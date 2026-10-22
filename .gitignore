@@ -1,0 +1,14 @@
+# Deployment-local values. Everything listed here is ignored by git.
+scripts/local.env
+p7/afd_overlay/afd.local.json
+# Real working-tree peer file: its index removal is staged during the public
+# cutover, and it stays ignored so it cannot be re-added by accident.
+p7/afd_overlay/afd.json
+
+# Local build outputs and interpreter caches.
+/native/bin/
+__pycache__/
+*.pyc
+
+# Default DSPARK_EVAL_OUT target; benchmark sources under gx/ stay tracked.
+/eval-out/

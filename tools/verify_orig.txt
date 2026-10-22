@@ -1,0 +1,3 @@
+DeepSeek-V4.1-Flash-1017-orig/model-00048-of-00048.safetensors: OK
+DeepSeek-V4.1-Flash-1017-orig/model-00047-of-00048.safetensors: OK
+VERIFY_DONE ok=2 failed=0

@@ -1,0 +1,18 @@
+# Example unit only: this repository never installs, enables, or applies it.
+# Edit the device list, install it under /etc/systemd/system/ yourself, and
+# enable it only after confirming the IOMMU groups with gdr/iommu_identity.sh.
+#
+# The BDFs below are placeholders, not defaults for any machine.
+[Unit]
+Description=AFD-TP3: identity IOMMU domain for the RoCE NIC functions used by GPUDirect RDMA (example)
+After=network-pre.target
+Before=NetworkManager.service network-online.target nfs-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/afd-gdr-iommu.sh identity 0000:3b:00.0 0000:3b:00.1
+ExecStop=/usr/local/sbin/afd-gdr-iommu.sh DMA-FQ 0000:3b:00.0 0000:3b:00.1
+
+[Install]
+WantedBy=multi-user.target

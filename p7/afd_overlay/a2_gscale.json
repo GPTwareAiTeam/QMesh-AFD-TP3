@@ -1,0 +1,329 @@
+{
+ "about": "NVFP4 activation global-scale fix for the routed experts: the checkpoint stores input_scale = amax/(6*448), so the kernel multiplier 1/input_scale is 448x the modelopt convention and its e4m3 block scale saturates at 448, clipping the activation at 2688/gscale. div[layer] divides w2_input_global_scale so that gscale becomes 2/amax_gx, where amax_gx is the per-layer activation amax measured by the GX workers' --calib on the same model and run. The GEMM epilogue is invariant because a2_gscale*g2_alpha always equals the pack weight_scale_2.",
+ "margin": 2.0,
+ "source": "GX gxw1:/w/a2.json (40-layer activation amax) + /tmp/afd_dump/scales_L*.npz a2_gscale",
+ "div": {
+  "0": 8.811109,
+  "1": 14.419432,
+  "2": 11.554009,
+  "3": 222.810015,
+  "4": 270.09388,
+  "5": 122.783191,
+  "6": 175.230329,
+  "7": 96.516187,
+  "8": 5.959097,
+  "9": 32.439732,
+  "10": 6.286624,
+  "11": 29.599056,
+  "12": 558.34022,
+  "13": 131.282853,
+  "14": 5.34813,
+  "15": 0.837132,
+  "16": 4.674839,
+  "17": 3.043014,
+  "18": 0.54581,
+  "19": 0.515283,
+  "20": 2.549355,
+  "21": 0.066474,
+  "22": 0.356447,
+  "23": 1.305076,
+  "24": 0.132439,
+  "25": 0.163678,
+  "26": 0.943305,
+  "27": 0.450895,
+  "28": 0.421212,
+  "29": 0.42354,
+  "30": 1.658193,
+  "31": 1.003432,
+  "32": 5.007255,
+  "33": 1.363922,
+  "34": 1.217877,
+  "35": 0.432875,
+  "36": 0.19378,
+  "37": 0.341331,
+  "38": 0.367964,
+  "39": 0.328206
+ },
+ "layers": {
+  "0": {
+   "amax_gx": 0.072115,
+   "a2_gscale": 244.3636,
+   "gs_new": 27.733583,
+   "clip": 96.9,
+   "sf_headroom": 96.9
+  },
+  "1": {
+   "amax_gx": 0.124051,
+   "a2_gscale": 232.4757,
+   "gs_new": 16.122388,
+   "clip": 166.7,
+   "sf_headroom": 166.7
+  },
+  "2": {
+   "amax_gx": 0.076833,
+   "a2_gscale": 300.7552,
+   "gs_new": 26.03038,
+   "clip": 103.3,
+   "sf_headroom": 103.3
+  },
+  "3": {
+   "amax_gx": 1.709619,
+   "a2_gscale": 260.6545,
+   "gs_new": 1.169851,
+   "clip": 2297.7,
+   "sf_headroom": 2297.7
+  },
+  "4": {
+   "amax_gx": 2.298511,
+   "a2_gscale": 235.0164,
+   "gs_new": 0.870129,
+   "clip": 3089.2,
+   "sf_headroom": 3089.2
+  },
+  "5": {
+   "amax_gx": 1.678676,
+   "a2_gscale": 146.2857,
+   "gs_new": 1.191415,
+   "clip": 2256.1,
+   "sf_headroom": 2256.1
+  },
+  "6": {
+   "amax_gx": 2.232753,
+   "a2_gscale": 156.9635,
+   "gs_new": 0.895755,
+   "clip": 3000.8,
+   "sf_headroom": 3000.8
+  },
+  "7": {
+   "amax_gx": 1.319557,
+   "a2_gscale": 146.2857,
+   "gs_new": 1.51566,
+   "clip": 1773.5,
+   "sf_headroom": 1773.5
+  },
+  "8": {
+   "amax_gx": 0.07205,
+   "a2_gscale": 165.4154,
+   "gs_new": 27.758462,
+   "clip": 96.8,
+   "sf_headroom": 96.8
+  },
+  "9": {
+   "amax_gx": 0.431444,
+   "a2_gscale": 150.3776,
+   "gs_new": 4.6356,
+   "clip": 579.9,
+   "sf_headroom": 579.9
+  },
+  "10": {
+   "amax_gx": 0.064609,
+   "a2_gscale": 194.6063,
+   "gs_new": 30.955619,
+   "clip": 86.8,
+   "sf_headroom": 86.8
+  },
+  "11": {
+   "amax_gx": 0.355123,
+   "a2_gscale": 166.6977,
+   "gs_new": 5.631858,
+   "clip": 477.3,
+   "sf_headroom": 477.3
+  },
+  "12": {
+   "amax_gx": 4.180282,
+   "a2_gscale": 267.1304,
+   "gs_new": 0.478437,
+   "clip": 5618.3,
+   "sf_headroom": 5618.3
+  },
+  "13": {
+   "amax_gx": 1.092803,
+   "a2_gscale": 240.2682,
+   "gs_new": 1.830156,
+   "clip": 1468.7,
+   "sf_headroom": 1468.7
+  },
+  "14": {
+   "amax_gx": 0.060932,
+   "a2_gscale": 175.5428,
+   "gs_new": 32.823221,
+   "clip": 81.9,
+   "sf_headroom": 81.9
+  },
+  "15": {
+   "amax_gx": 0.058238,
+   "a2_gscale": 28.7487,
+   "gs_new": 34.34187,
+   "clip": 78.3,
+   "sf_headroom": 78.3
+  },
+  "16": {
+   "amax_gx": 0.058262,
+   "a2_gscale": 160.4776,
+   "gs_new": 34.327944,
+   "clip": 78.3,
+   "sf_headroom": 78.3
+  },
+  "17": {
+   "amax_gx": 0.068207,
+   "a2_gscale": 89.2282,
+   "gs_new": 29.32232,
+   "clip": 91.7,
+   "sf_headroom": 91.7
+  },
+  "18": {
+   "amax_gx": 0.060916,
+   "a2_gscale": 17.92,
+   "gs_new": 32.831916,
+   "clip": 81.9,
+   "sf_headroom": 81.9
+  },
+  "19": {
+   "amax_gx": 0.057509,
+   "a2_gscale": 17.92,
+   "gs_new": 34.777034,
+   "clip": 77.3,
+   "sf_headroom": 77.3
+  },
+  "20": {
+   "amax_gx": 0.03604,
+   "a2_gscale": 141.4737,
+   "gs_new": 55.493912,
+   "clip": 48.4,
+   "sf_headroom": 48.4
+  },
+  "21": {
+   "amax_gx": 0.007419,
+   "a2_gscale": 17.92,
+   "gs_new": 269.578096,
+   "clip": 10.0,
+   "sf_headroom": 10.0
+  },
+  "22": {
+   "amax_gx": 0.009548,
+   "a2_gscale": 74.6667,
+   "gs_new": 209.474999,
+   "clip": 12.8,
+   "sf_headroom": 12.8
+  },
+  "23": {
+   "amax_gx": 0.038599,
+   "a2_gscale": 67.6226,
+   "gs_new": 51.815095,
+   "clip": 51.9,
+   "sf_headroom": 51.9
+  },
+  "24": {
+   "amax_gx": 0.014781,
+   "a2_gscale": 17.92,
+   "gs_new": 135.30781,
+   "clip": 19.9,
+   "sf_headroom": 19.9
+  },
+  "25": {
+   "amax_gx": 0.018268,
+   "a2_gscale": 17.92,
+   "gs_new": 109.483123,
+   "clip": 24.6,
+   "sf_headroom": 24.6
+  },
+  "26": {
+   "amax_gx": 0.049832,
+   "a2_gscale": 37.8592,
+   "gs_new": 40.1346,
+   "clip": 67.0,
+   "sf_headroom": 67.0
+  },
+  "27": {
+   "amax_gx": 0.050323,
+   "a2_gscale": 17.92,
+   "gs_new": 39.743175,
+   "clip": 67.6,
+   "sf_headroom": 67.6
+  },
+  "28": {
+   "amax_gx": 0.016454,
+   "a2_gscale": 51.2,
+   "gs_new": 121.553908,
+   "clip": 22.1,
+   "sf_headroom": 22.1
+  },
+  "29": {
+   "amax_gx": 0.02332,
+   "a2_gscale": 36.3243,
+   "gs_new": 85.763647,
+   "clip": 31.3,
+   "sf_headroom": 31.3
+  },
+  "30": {
+   "amax_gx": 0.061689,
+   "a2_gscale": 53.76,
+   "gs_new": 32.420837,
+   "clip": 82.9,
+   "sf_headroom": 82.9
+  },
+  "31": {
+   "amax_gx": 0.044796,
+   "a2_gscale": 44.8,
+   "gs_new": 44.646772,
+   "clip": 60.2,
+   "sf_headroom": 60.2
+  },
+  "32": {
+   "amax_gx": 0.146231,
+   "a2_gscale": 68.4841,
+   "gs_new": 13.67697,
+   "clip": 196.5,
+   "sf_headroom": 196.5
+  },
+  "33": {
+   "amax_gx": 0.056576,
+   "a2_gscale": 48.2152,
+   "gs_new": 35.350451,
+   "clip": 76.0,
+   "sf_headroom": 76.0
+  },
+  "34": {
+   "amax_gx": 0.059353,
+   "a2_gscale": 41.0382,
+   "gs_new": 33.696473,
+   "clip": 79.8,
+   "sf_headroom": 79.8
+  },
+  "35": {
+   "amax_gx": 0.047346,
+   "a2_gscale": 18.2857,
+   "gs_new": 42.24251,
+   "clip": 63.6,
+   "sf_headroom": 63.6
+  },
+  "36": {
+   "amax_gx": 0.021627,
+   "a2_gscale": 17.92,
+   "gs_new": 92.475923,
+   "clip": 29.1,
+   "sf_headroom": 29.1
+  },
+  "37": {
+   "amax_gx": 0.038095,
+   "a2_gscale": 17.92,
+   "gs_new": 52.500409,
+   "clip": 51.2,
+   "sf_headroom": 51.2
+  },
+  "38": {
+   "amax_gx": 0.041067,
+   "a2_gscale": 17.92,
+   "gs_new": 48.700395,
+   "clip": 55.2,
+   "sf_headroom": 55.2
+  },
+  "39": {
+   "amax_gx": 0.03663,
+   "a2_gscale": 17.92,
+   "gs_new": 54.599876,
+   "clip": 49.2,
+   "sf_headroom": 49.2
+  }
+ }
+}

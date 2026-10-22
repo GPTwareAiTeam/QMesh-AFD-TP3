@@ -1,0 +1,31 @@
+Native AFD transport sources
+=============================
+
+The six source files in this directory (`qmesh_afd_peer.cpp`,
+`qmesh_afd_edge.cpp`, `qmesh_afd_seam.cu`, `qmesh_afd_seam_host.inc`,
+`qmesh_afd_seam_api.inc`, `qmesh_afd_seam_py.inc`) are custom, first-party QMesh
+work, not third-party code. They come from the private QMesh native-transport
+tree at branch `qmesh-hybrid-hotpath`, commit
+`b88ec90fd2465d647dd250f7282c7a3716584c26`. See `PROVENANCE.md` for per-file
+hashes and the include closure.
+
+The four `qmesh_afd_seam*` files are byte-for-byte copies.
+`qmesh_afd_edge.cpp` and `qmesh_afd_peer.cpp` were public-sanitized:
+host-specific RDMA device names and private management IPs were replaced by
+generic/loopback examples, and those arguments are now required explicitly.
+Executable code is otherwise unchanged.
+
+License
+-------
+
+The origin tree has no `LICENSE`, `COPYING`, or `NOTICE` file, and these sources
+carry no copyright or SPDX header. They are custom, first-party QMesh work.
+The repository owner publishes them under the root MIT license text
+(`../LICENSE`), whose copyright line is
+`Copyright (c) 2026 QMesh contributors`. That collective line covers the QMesh
+distribution; it does not name individual authors. The origin tree supplies no
+separate license text or grant.
+
+No third-party source or binary is redistributed in this directory. `build.sh`
+links the system `libibverbs` (rdma-core) and CUDA runtime; those licenses come
+from the installed packages.
