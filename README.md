@@ -8,6 +8,22 @@ the whole attention stack, router, shared experts, head, KV cache, scheduler
 and DSpark drafter; two GB10 systems (`GX1`, `GX2`) hold stateless slices of
 every routed expert and return partial FFN outputs over RDMA.
 
+## Credits and upstream foundations
+
+This work builds on substantial upstream contributions:
+
+- **[DeepSeek](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)** — the model and DSpark draft weights; **[LibertAI](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-NVFP4)** — the NVFP4 checkpoint/transcode.
+- **[vLLM](https://github.com/vllm-project/vllm)** and **[kacper-daftcode / vLLM-Moet](https://github.com/kacper-daftcode/vLLM-Moet)** — the serving foundation, SM120 integration, and upstream code. Our mHC kernels are **modified vLLM-Moet derivatives**, not independent QMesh implementations; those kernels and the copied runtime overlays remain **Apache-2.0**.
+- **[TensorFold](https://github.com/ashhart/TensorFold)** — an expert-kernel design reference; **[DeepInfer](https://github.com/deepseek-ai/DeepInfer)** — investigated scheduling and retention design references, not a deployed replacement engine.
+- **[DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)**, **[NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass)**, **[FlashInfer](https://github.com/flashinfer-ai/flashinfer)**, and the other runtime dependencies listed in **[CREDITS.md](CREDITS.md)**.
+
+QMesh contributes the distributed expert partitioning, native transport,
+graph-safe synchronization, integration, and measured optimizations described
+here. See **[CREDITS.md](CREDITS.md)** for the full attribution and license map,
+and **[third_party/vllm/NOTICE](third_party/vllm/NOTICE)** for upstream notices.
+
+## Measured status
+
 This is a measured research deployment, not a production serving system. It is
 specific to this model, these three devices and the column split below.
 
