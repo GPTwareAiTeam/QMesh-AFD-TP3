@@ -42,16 +42,15 @@ passes vs **15/16, 15/16, 14/16** at k7). k7 was rejected and k5 restored.
 
 ## Getting started
 
-All commands below run from the repository root. The proposed standalone
-repository is `GPTwareAiTeam/QMesh-AFD-TP3`; it is not published yet. Once it is
-created, clone it with:
+All commands below run from the repository root. The standalone repository
+`GPTwareAiTeam/QMesh-AFD-TP3` is private for review; cloning requires access:
 
 ```bash
 git clone https://github.com/GPTwareAiTeam/QMesh-AFD-TP3.git qmesh-afd-tp3
 cd qmesh-afd-tp3
 ```
 
-Until then, use the root of the extracted source tree as the repository root.
+For a source archive, use the root of the extracted tree as the repository root.
 
 ## Architecture
 
