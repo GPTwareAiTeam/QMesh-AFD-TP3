@@ -1,0 +1,20 @@
+{
+  "transport": {
+    "recipe": "C7 3-rank merged-vNIC (launch_clean.sh, ALLPEER3 28.4us/op era) via PyNccl, grouped send/recv, one CUDA graph per step",
+    "hosts": ["P7 GPU0", "GX1", "GX2"],
+    "payload": {"send_B_per_gx": "R*(5120+24)*2", "return_B_per_gx": "R*5120*2 (bf16 partial)"},
+    "pipelined_40_layers": {
+      "R1":  {"eager_us_layer": 45.9, "graph_us_layer": 64.6},
+      "R6":  {"eager_us_layer": 64.7, "graph_us_layer": 84.1},
+      "R48": {"eager_us_layer": 148.3, "graph_us_layer": 170.9}
+    },
+    "serialized_1_layer_300_iters": {
+      "R1":  {"eager_us_layer": 46.7, "graph_us_layer": 236.5},
+      "R6":  {"eager_us_layer": 69.4, "graph_us_layer": 321.6},
+      "R48": {"eager_us_layer": 150.9, "graph_us_layer": 509.6}
+    },
+    "data_ok": true,
+    "verdict": "Gate A target 60us/layer at R=6 NOT met by NCCL (69.4us serialized eager). CUDA-graph replay costs ~250us fixed here, so graphs are not usable for this exchange as captured. Raw verbs measured 14.8us one-way for 120KB => custom RDMA-write path (~35-40us serialized round trip) is the transport.",
+    "runs": ["c7-allpeer-r1", "c7-allpeer-r2", "c7-allpeer-bf16", "c7-serial-r1"]
+  }
+}

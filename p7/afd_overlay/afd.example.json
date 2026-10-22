@@ -1,0 +1,20 @@
+{
+  "_comment": "Public sample only. RFC 5737 addresses and generic device names; a real launch refuses this file via public_sample. Copy to afd.local.json (gitignored) and set dev/gid/ip/port per GX rail.",
+  "public_sample": true,
+  "layers": 40,
+  "rows": 4096,
+  "peers": [
+    {
+      "dev": "mlx5_0",
+      "gid": 3,
+      "ip": "192.0.2.11",
+      "port": 47101
+    },
+    {
+      "dev": "mlx5_1",
+      "gid": 4,
+      "ip": "192.0.2.12",
+      "port": 47120
+    }
+  ]
+}

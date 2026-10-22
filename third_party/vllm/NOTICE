@@ -1,0 +1,127 @@
+Third-party notice for vLLM-derived files
+=========================================
+
+The files identified below are copied or derived from vLLM / vLLM-Moet and
+remain licensed under the Apache License, Version 2.0; see LICENSE in this
+directory. vLLM-Moet is built on vLLM v0.24.0. The copies and the mHC
+derivative in this experiment come from image vllm-moet:dsv41-213d5fa
+(vLLM-Moet build commit 49cb2bbf71cfd36ee5aa33d1e184b1cddff55294; project HEAD
+19befd2f38783fed5033fb260d82e5c4acb12b36).
+
+Modification notices (Apache License 2.0, section 4(b))
+-------------------------------------------------------
+
+Modified by QMesh (2026) for the DSV4.1 AFD-TP3 experiment:
+
+- p7/mhc_quant/overlay/models/deepseek_v41/nvidia/ops/mhc.py
+  mHC fused MXFP8 quant: adds a prequant boundary path that runs
+  `mhc_post_norm_quant` and carries the F8_128x4 activation as `_moet_qa`,
+  with per-(n, hidden, device) q/sf buffers; falls back to `mhc_post_norm`.
+- p7/mhc_quant/overlay/models/deepseek_v41/nvidia/model.py
+  mHC fused MXFP8 quant: enables prequant at the attention boundary only; the
+  FFN boundary and `write_kv` keep the default path.
+- p7/mhc_quant/overlay/models/deepseek_v41/attention.py
+  mHC fused MXFP8 quant: `_fused_wqa_wkv_gemm` consumes `_moet_qa` when the
+  FlashInfer MXFP8 kernel declares the matching dynamic input; every other
+  kernel uses the served path.
+- p7/mhc_quant/kernel/mhc_post_norm_sm120.cu
+- p7/mhc_quant/kernel/mhc_post_norm_sm120.py
+  Derived from vLLM-Moet mHC sources; see "Derived mHC kernel" below.
+- p7/dspark_retention/overlay/vllm/v1/core/kv_cache_planning.py
+  DSpark retention: when `use_dspark()` is active, retain at least
+  `num_speculative_tokens + 1` tokens below a sliding-window boundary; the
+  non-DSpark path is unchanged.
+- p7/dspark_retention/overlay/vllm/v1/attention/backends/mla/sparse_swa.py
+  DSpark retention: map context positions in the null SWA block (block 0) to
+  slot -1 so they cannot alias real KV; other paths are unchanged.
+
+The two `p7/dspark_retention/src/...` files below are unmodified copies of
+files extracted from the same image. Their SHA-256 values are pinned in
+`p7/dspark_retention/manifest.txt` and `package.sh`. They are listed here for
+complete provenance and carry no additional modification notice.
+
+- p7/dspark_retention/src/vllm/v1/core/kv_cache_planning.py
+- p7/dspark_retention/src/vllm/v1/attention/backends/mla/sparse_swa.py
+
+The five modified overlay files and the two unmodified `src/` extracts retain
+their upstream Apache-2.0 and vLLM copyright headers. The mHC-derived files
+add the headers listed below.
+
+Derived mHC kernel (Apache-2.0)
+------------------------------
+
+`p7/mhc_quant/kernel/mhc_post_norm_sm120.cu` and
+`p7/mhc_quant/kernel/mhc_post_norm_sm120.py` are modified derivatives of
+vLLM-Moet:
+
+- tools/dsv41_sm120/mhc_overlap/mhc_post_norm_sm120.cu
+  blob 13ec2c97631ce020cc194354ef8e008af696a21d
+- tools/dsv41_sm120/mhc_overlap/mhc_post_norm_sm120.py
+  blob e2c58328b1c32c3e6b7524b87c51714ae5f7b820
+
+QMesh changes: removed the optional peer-to-peer all-reduce consumer (the
+`kAR` path, `ar_*` arguments, and `p2p_allreduce_sm120` call); added the
+MXFP8/UE8M0 quantization epilogue (`mhc_post_norm_quant`) and its swizzled
+scale output; adapted the Python wrapper and the `mhc_post_norm` signature.
+The upstream file implements the behavior of vLLM's TileLang mHC kernels and
+references vLLM-Moet's `mhc_pre_norm_sm120.cu`. The QMesh files are
+Apache-2.0, not root MIT, and carry:
+
+SPDX-FileCopyrightText: Copyright 2026 the vLLM-Moet authors
+SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+SPDX-FileCopyrightText: 2026 QMesh contributors
+SPDX-License-Identifier: Apache-2.0
+
+The specific upstream file has no per-file copyright line; the vLLM-Moet
+project NOTICE supplies `Copyright 2026 the vLLM-Moet authors`.
+
+Path note: all live overlay headers, patcher strings, and package-script
+references cite this standalone path, `third_party/vllm/NOTICE`. The previous
+experiment path `experiments/dsv41-afd-tp3/...` no longer appears in live
+sources. The DSpark overlay `overlay_sha256` pins in
+`p7/dspark_retention/manifest.txt` and `package.sh` were regenerated for the
+header change; source hashes are unchanged.
+
+Scope note: this repository does not redistribute DeepGEMM, the cubit
+toolchain, model weights, or a prebuilt `deep_gemm` wheel. The upstream notice
+is retained in full below for attribution. `gx/kernels/fp4_decode_moe_swz.cu`
+is not a vLLM-derived file; it follows vLLM's documented block-scale swizzle
+layout but copies no vLLM source and is licensed MIT by QMesh.
+
+Upstream NOTICE (retained in full)
+----------------------------------
+
+vLLM-Moet
+Copyright 2026 the vLLM-Moet authors
+
+This product includes software developed for serving frontier Mixture-of-Experts
+models (DeepSeek-V4-Flash, GLM-5.2, Kimi-K2.7-Code) on consumer/workstation SM120
+GPUs: 2-bit MoE expert quantization, an FP4 "delta" tier, tiered expert residency
+(host RAM / NVMe expert stores), and hand-written SASS kernels (the `cubit`
+toolchain).
+
+Built on and incorporating:
+
+- vLLM (https://github.com/vllm-project/vllm), Apache License 2.0,
+  Copyright contributors to the vLLM project. The base is the official tag v0.24.0;
+  `patch/vllm-moet-v0.24.0.patch` is applied on top of it. DeepSeek-V4 model support,
+  sparse-MLA / MTP / indexer and SM120 enablement ship in upstream vLLM and were authored
+  by vLLM contributors — not by this project. This project's own contribution is the
+  2-bit MoE + FP4 delta cache + confidence gate + expert stores + the cubit kernels,
+  plus small SM120 fixes to the upstream base (carried in the patch).
+
+- DeepGEMM (https://github.com/deepseek-ai/DeepGEMM), MIT License, Copyright (c) 2025
+  DeepSeek. Used at runtime on SM120 — FP8 dense/einsum GEMMs, the indexer's MQA logits,
+  hc_prenorm, and the stock DEEPGEMM_MXFP4 MoE path the MTP drafter runs on — via the
+  nv-dev pin `a6b593d2`, whose SM120 backend was authored by the NVIDIA DevTech APAC team
+  (deepseek-ai/DeepGEMM PR #324). The Docker image builds it from source at that pin;
+  any prebuilt `deep_gemm` wheel distributed alongside this project is covered by that
+  MIT license and copyright.
+
+- Model weights (DeepSeek-V4-Flash, GLM-5.2, Kimi-K2.7-Code checkpoints) are NOT
+  included or redistributed. Obtain the official checkpoints separately; the 2-bit
+  planes are built from them at load time.
+
+cubit (the SASS assembler and the hand-written kernels under `kernels/`) and the 2-bit
+MoE + FP4-delta + expert-store code added by `patch/vllm-moet-v0.24.0.patch` are the
+original contribution of this project.

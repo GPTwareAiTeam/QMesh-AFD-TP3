@@ -1,0 +1,42 @@
+[   86.8s] layer 2 ok
+[   87.5s] layer 3 ok
+[   88.7s] layer 0 ok
+[   88.8s] layer 5 ok
+[   89.5s] layer 4 ok
+[   90.3s] layer 1 ok
+[  184.8s] layer 7 ok
+[  186.4s] layer 8 ok
+[  188.5s] layer 11 ok
+[  188.6s] layer 6 ok
+[  189.2s] layer 9 ok
+[  189.4s] layer 10 ok
+[  286.1s] layer 15 ok
+[  286.6s] layer 17 ok
+[  288.0s] layer 13 ok[  288.5s] layer 12 ok
+
+[  288.8s] layer 14 ok
+[  289.5s] layer 16 ok
+[  369.6s] layer 19 ok
+[  369.6s] layer 18 ok
+[  370.4s] layer 20 ok
+[  371.1s] layer 22 ok
+[  371.5s] layer 21 ok
+[  371.8s] layer 23 ok
+[  429.5s] layer 27 ok
+[  430.4s] layer 25 ok[  430.4s] layer 24 ok
+
+[  431.3s] layer 28 ok
+[  431.3s] layer 26 ok
+[  432.1s] layer 29 ok
+[  475.1s] layer 30 ok
+[  476.7s] layer 31 ok
+[  478.9s] layer 33 ok[  478.9s] layer 34 ok
+
+[  479.7s] layer 32 ok
+[  480.4s] layer 35 ok
+[  517.0s] layer 36 ok
+[  518.8s] layer 38 ok
+[  518.9s] layer 37 ok
+[  519.6s] layer 39 ok
+[  547.5s] p7 dense ok (5 files)
+DONE {'p7': 71.19, 'gx1': 106.79, 'gx2': 106.79}
