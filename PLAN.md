@@ -645,15 +645,17 @@ overlay sha256 `ff922a17...` and `50445556...`.
 
 ### W8. DSpark speculative decoding: measured results (2026-10-22)
 
-**Status.** COMPLETE for k0/k1/k3/k5. Four primary configurations x **64 forced
+**Status.** COMPLETE for k0/k1/k3/k5; k7 (`SPEC_TOKENS=7`) was measured and
+**rejected**. Four primary configurations x **64 forced
 timed rows** each (8 types x 2 prompts x 2 pairs x 2 repeats = 64 rows per
 configuration), plus k5 RG6 and paired-k5 comparison conditions (64 rows
-each), for **384 timed rows**. Forced budgets (`ignore_eos`, `max_tokens ==
-`min_tokens`) make every timed row performance-only and invalid for quality.
-TTFT includes request, template and network overhead and is not pure prefill;
-decode is the streaming decode-window rate from SSE `usage.completion_tokens`,
-never chunk count. The **120 tok/s goal was not reached**, and no aggregate 120
-tok/s claim is made.
+each), for **384 timed rows**; the matched k5/k7 A/B adds **128 timed rows** (64
+per configuration) and **144 quality rows**. Forced budgets (`ignore_eos`,
+`max_tokens == `min_tokens`) make every timed row performance-only and invalid
+for quality. TTFT includes request, template and network overhead and is not
+pure prefill; decode is the streaming decode-window rate from SSE
+`usage.completion_tokens`, never chunk count. The **120 tok/s goal was not
+reached**, and no aggregate 120 tok/s claim is made.
 
 **Deployment.** The drafter is loaded: `DSpark draft model loaded: 97 params`,
 boot `Model loading took 88.92 GiB`, **88.93 GiB** weights including the
@@ -751,6 +753,51 @@ configuration. Rollback is clean: production worker
 and `k5 paired` are separate conditions under different host conditions and are
 not a controlled A/B; the earlier **102.82** is not a direct RG comparison.
 
+**k7 trial (`SPEC_TOKENS=7`; rejected, 2026-10-22).** Same budget as k5:
+`GPU_MEM_UTIL=0.97`, `DSPARK_EXTRA_GIB=1`, captures `1,7,8`, `MAX_CAPTURE=8`,
+retention extra **8** (`SPEC_TOKENS + 1`), `MAX_MODEL_LEN=8192`,
+`MAX_NUM_SEQS=1`, `MAX_NUM_BATCHED_TOKENS=4096`, prefix caching off. Two
+configurations under identical prompts and budgets, **64 forced rows** each,
+64/64 valid, `prompt_exact` and `budget_exact` in every row:
+
+| condition | short decode tok/s (1024p/128c) | long decode tok/s (128p/1024c) | short E2E s | long E2E s |
+|---|---:|---:|---:|---:|
+| k5 (k7 A/B baseline) | 77.84 | 105.07 | 2.219 | 10.06 |
+| k7 | 67.67 | 95.97 | 2.465 | 10.99 |
+| delta | **-13.07%** | **-8.65%** | +11.1% | +9.26% |
+
+TTFT is flat (0.568 / 0.319 s at k5, 0.578 / 0.324 s at k7), so the loss is in
+the decode loop. Spec counters: acceptance **0.6918 -> 0.5486**, accepted
+tokens 28,656 -> 29,332, drafted tokens 41,420 -> 53,466 over 8,284 -> 7,638
+draft steps. `mean_accepted_length` rises 4.459 -> 4.840, but that counter
+includes the bonus token, so it is *emitted tokens per speculative step*:
+3.459 + 1 accepted at k5 against 3.840 + 1 at k7. Acceptance by position is
+0.896/0.788/0.687/0.589/0.499 at k5 and
+0.873/0.750/0.643/0.536/0.448/**0.351**/**0.239** at k7: the two new positions
+are the weakest of the seven, so the wider verify step buys fractionally more
+emitted tokens per step at a large cost in per-step work and 13.07% short-decode
+rate. The target is still not met: k7 reaches 120 tok/s in **4 of 64** individual
+requests (all long, max 134.35) against 3 of 64 in the k5 baseline, and no
+per-context median does.
+
+**Confound.** GPU0's SM clock mean is **2294 MHz** in both windows, GPU0 power
+178.3 W (k7) vs 181.0 W (k5), GPU0 util 99.1% vs 98.6%, so clock and thermal
+throttling do not explain the gap. However GPU1 carried an external workload
+during part of the k7 window (util mean **23.6%**, GPU1 SM mean 1879 MHz) that
+is outside our control, and the k5 counter window is the prior run's, not the
+paired run's. The drop is therefore **not proven engine-only** and is not
+attributed to clocks or heat. Verdict: **k5 per-layer retained, k7 rejected,
+no follow-up k7 campaign**; k5 was restored and served healthily on port 8001.
+
+Artifacts (eval results directory, untracked): `round_k5_k7pair_20261022T122131Z/`,
+`round_k5_k7pair_chatq1/`, `round_k5_k7pair_chatq2/`,
+`round_k7_20261022T124251Z/` (with `k7_pair_analysis.json`), `round_k7_chatq1/`,
+`round_k7_chatq2/`, `round_k7_boot_20261022T123333Z/`,
+`round_k5_restore_20261022T125508Z/`, `compare_k7_20261022T125136Z.txt`,
+`gpu_sampler_1017.csv`, `k7_result_20261022T130500Z.json`. Harness SHA256
+`c379d3f6a6fccb61fe3bdde6757bd9f560ae7ff36fe08bf005a9d623f1f21045`; fixtures
+unchanged (`2433c0eb...`).
+
 **Quality.** Official chat endpoint, thinking disabled, `max_tokens=1024`,
 natural stop: 3 configurations x 2 passes x 24 rows = **144 quality rows**
 (16 greedy + 8 sampled per pass).
@@ -761,12 +808,23 @@ natural stop: 3 configurations x 2 passes x 24 rows = **144 quality rows**
 | k3 | 15/16 | 15/16 | 8/8 |
 | k5 | 15/16 | 14/16 | 8/8 |
 
-`codeedit-b` fails `page_bounds` in all six passes; this is a baseline/prompt
-limitation, not DSpark-specific. k5 pass 2 also fails `codegen-b` (private
-`_failure_count` vs public `failures`): one k5-only discordance, zero reverse,
+`codeedit-b` fails `page_bounds` in all six passes, including k0: the generated
+module defines `total_pages()` and omits the required symbol, so the requested
+public surface is incomplete (the code parses; the contract still fails). k5
+pass 2 also fails `codegen-b` (private `_failure_count` vs public `failures`):
+one k5-only discordance, zero reverse,
 exact McNemar **p=1.0**. Greedy outputs are not bit-identical across passes even
 at k0 (k0 **6/16** exact repeats, k3 **5/16**, k5 **7/16**). There is **no
 formal quality or lossless claim**.
+
+The k7 A/B added three natural-stop passes per configuration on the same
+endpoint: k5 **15/16, 15/16, 15/16**, k7 **15/16, 15/16, 14/16**, sampled
+**8/8** in all six. k7's third pass misses `codegen-b`: the generated module
+exposes `failure_count` where the probe requires the consumer-visible
+`failures` attribute (it parses, 1567 chars, `finish_reason=stop`), so a caller
+reading `failures` breaks. That is a public-API requirement of the probe, not a
+harness or token-check artifact, and it is k7-only. k7 shows **no quality
+gain**.
 
 **Memory.** Weights **88.93 GiB**; k0 launch **86,622 MiB used / 10,628 MiB
 free** (util 0.90); k3 **93,498 / 3,752**; k5 per-layer **93,506 / 3,744**; RG6
@@ -775,8 +833,16 @@ free** (earlier k5 snapshots 3,744 MiB free), so measured headroom is
 **~2.9–3.7 GiB**; 100% util, **184.4-184.6 W**, **2295 MHz**, **78 C**. GPU0's
 **97,887 MiB** total includes the driver/display reserve; do not derive free
 memory from total-minus-used.
-There was no OOM or failure across 384 timed + 144 quality rows. Rebalancing
-onto P7 remains **ruled out**.
+
+The k7 trial kept the same headroom: KV capacity **20,134** tokens (k5 20,227),
+CUDA graph pool **0.09 GiB** (k5 0.08), and one main plus one dspark graph
+captured, the same graph count as k5. After the k7 timed run GPU0 read
+**95,398 MiB used / 1,852 MiB free**; the restored k5 read **93,536 / 3,714
+MiB** at idle. Boot to healthy was **502 s** for k7 and **461 s** for the
+restored k5. Measured snapshots only; never derive free from total-minus-used.
+There was no OOM or failure across the campaign's 384 timed + 144 quality rows,
+nor in the k7 trial's 128 timed + 144 quality rows. Rebalancing onto P7 remains
+**ruled out**.
 
 **Retention.** Minimum is **134 = 128 + 6**; **140** is DeepInfer's conservative
 example, not the minimum. Patches: vllm-moet `c64b2f5` (patcher) and `3fa14b9`
@@ -785,14 +851,16 @@ example, not the minimum. Patches: vllm-moet `c64b2f5` (patcher) and `3fa14b9`
 CPU proof at `C=255`, `W=128`, block 128: E=0 frees and nulls entry 0; E=6
 skips 122 tokens, keeps entry 0, maps position 127 to real slot 255; the guard
 masks null blocks to -1. Runtime: the overlay is mounted for every
-`SPEC_TOKENS>0` run; k5 retains **6** extra tokens. All runs completed with no
-null/evicted-block crash, no OOM, and zero request errors. This is a **runtime
-functional boundary; no full suffix bitwise proof was recorded**.
+`SPEC_TOKENS>0` run; k5 retains **6** extra tokens, and the rejected k7 trial
+retained **8** (`SPEC_TOKENS + 1`). All runs completed with no
+null/evicted-block crash, no OOM, and zero request errors, so the retention
+boundary holds at `E=8` as it does at `E=6`. This is a **runtime functional
+boundary; no full suffix bitwise proof was recorded**.
 
 **Guards.** Use exact capture sizes only; padded SM120 sparse-MLA rows are a
 known hang. Keep `AFD_LAYERS=40` and `AFD_NUM_EXPERTS=384`; never route draft
-layers 40-42 to GX. Do not touch the transport. Do not adopt RG6 or quote an
-aggregate 120 tok/s or quality/lossless result.
+layers 40-42 to GX. Do not touch the transport. Do not adopt RG6 or k7, and do
+not quote an aggregate 120 tok/s or quality/lossless result.
 
 **Repro.** Canonical k5 per-layer launch:
 
@@ -809,7 +877,22 @@ python3 eval/dspark_workload_eval.py --execute --label k5 \
   --engine-container dsv41-dspark-k5
 ```
 
-Harness SHA256 `7ffd626c9c2fa168f1369e40a225575ebf24742e79c185a996e0a95b286a1806`;
+Rejected k7 trial:
+
+```bash
+SPEC_TOKENS=7 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1 \
+CAPTURE_SIZES=1,7,8 MAX_CAPTURE=8 NAME=dsv41-dspark-k7 \
+bash scripts/launch_engine_graphs.sh
+```
+
+```bash
+python3 eval/dspark_workload_eval.py --execute --label k7 \
+  --out-dir <results-dir>/round_k7 --repeats 2 --warmup 2 \
+  --quality-sampled --overwrite --engine-container dsv41-dspark-k7
+```
+
+Harness SHA256 `7ffd626c9c2fa168f1369e40a225575ebf24742e79c185a996e0a95b286a1806`
+(k5 campaign; the k7 A/B used `c379d3f6...`);
 fixtures SHA256 `2433c0eb06cf766301979895ab6599f580162518bb18a834982710cee377179c`
 (earlier k0/k3 fixtures `b06dc480...`). Raw rounds:
 the eval results directory. Full per-type/quality tables: the DSpark final-results artifact.

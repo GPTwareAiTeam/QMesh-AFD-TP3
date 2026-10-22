@@ -34,6 +34,12 @@ and **82.13 tok/s** in the short-decode condition (k3, 1024 prompt / 128
 completion). The **120 tok/s target was not reached** in any aggregate, and no
 lossless or formal quality claim is made.
 
+A matched k5/k7 A/B then measured `SPEC_TOKENS=7` (captures 1,7,8, max 8)
+against the retained k5 under the same engine budget: k5 **77.84 / 105.07
+tok/s**, k7 **67.67 / 95.97 tok/s** (short / long decode), **−13.07% / −8.65%**,
+acceptance **0.6918 vs 0.5486**, and no quality gain (**15/16** in all three k5
+passes vs **15/16, 15/16, 14/16** at k7). k7 was rejected and k5 restored.
+
 ## Getting started
 
 All commands below run from the repository root. The proposed standalone
@@ -333,6 +339,15 @@ CAPTURE_SIZES=1,5,6 MAX_CAPTURE=6 DSPARK_MEM_ACK=1 \
 bash scripts/launch_engine_graphs.sh
 ```
 
+The rejected k=7 trial (captures `1,7,8`, verify width 8, retention extra 8)
+used the same budget and acknowledged it explicitly:
+
+```bash
+SPEC_TOKENS=7 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1 \
+CAPTURE_SIZES=1,7,8 MAX_CAPTURE=8 DSPARK_MEM_ACK=1 NAME=dsv41-dspark-k7 \
+bash scripts/launch_engine_graphs.sh
+```
+
 Non-spec launches default to `SPEC_TOKENS=0`, `GPU_MEM_UTIL=0.90` and
 `MHC_QUANT=1`. DSpark requires an explicit memory budget; the launcher has no
 implicit 0.98. `AFD_TRANSPORT=0` is a diagnostic P7-only mode with no wire and
@@ -352,8 +367,9 @@ dispatch, `MHC_QUANT=1`, and TP1/GPU0.
 ### DSpark round
 
 Forced timed rows (`ignore_eos`, `max_tokens == min_tokens`): 64 rows per
-configuration (8 context types × 2 prompts × 2 pairs × 2 repeats), 384 timed
-rows across the six conditions below. Medians of per-prompt repeat medians:
+configuration (8 context types × 2 prompts × 2 pairs × 2 repeats): **384 timed
+rows** for the original six conditions plus **128** for the k5/k7 A/B
+(two conditions). Medians of per-prompt repeat medians:
 
 | condition | short decode tok/s (1024p/128c) | long decode tok/s (128p/1024c) | long E2E s |
 |---|---:|---:|---:|
@@ -363,6 +379,8 @@ rows across the six conditions below. Medians of per-prompt repeat medians:
 | k5 (early) | 78.49 | **102.82** | 10.27 |
 | k5 RG6 (rejected) | 76.31 | 98.81 | 10.67 |
 | k5 paired | 76.10 | 97.38 | 10.82 |
+| k5 (k7 A/B baseline) | 77.84 | 105.07 | 10.06 |
+| k7 (rejected) | 67.67 | 95.97 | 10.99 |
 
 - Acceptance is 0.84/0.91 for k1, 0.66/0.80 for k3 and 0.54/0.69 for k5
   (short/long). Short responses accept materially less than long ones.
@@ -377,6 +395,33 @@ rows across the six conditions below. Medians of per-prompt repeat medians:
   are not a controlled A/B, so 102.82 is not a direct RG comparison.
 - `k5 early` is the first k5 campaign; `k5 paired` is the matched comparison
   used for the RG6 verdict.
+- The matched **k5/k7 A/B** ran 64 forced rows per configuration (8 context
+  types × 2 prompts × 2 pairs × 2 repeats) with identical prompts and budgets;
+  all 64 rows are valid in each configuration and `prompt_exact` and
+  `budget_exact` hold in every row. **k7 (captures 1,7,8, max 8) is rejected**:
+  −13.07% short and −8.65% long decode. It reaches 120 tok/s in 4 of 64
+  individual requests (3 of 64 for the k5 baseline), all long, with no
+  per-context median at 120.
+- k7 accepts **0.5486** of its draft slots against k5's **0.6918**, while its
+  counter `mean_accepted_length` — which includes the bonus token, i.e. emitted
+  tokens per speculative step — is **4.840** against **4.459**. The extra width
+  is not free: positions 5 and 6 accept only **0.351** and **0.239**, so the
+  wider verify step costs more than the extra emitted token returns.
+- GPU0's SM clock mean was **2294 MHz** in both windows and GPU0 power slightly
+  lower at k7 (178.3 W vs 181.0 W), but GPU1 carried an external workload
+  through part of the k7 window (util mean 23.6%) that is outside our control,
+  and the k5 counter window is the prior run's, so the A/B is confounded. The
+  gap is not proven to be engine-only; it is not attributed to clocks or heat.
+- k5 was restored after the trial and served healthily on port 8001.
+
+Raw rounds and the paired verdict live under the eval results directory (not
+tracked): `round_k5_k7pair_20261022T122131Z/` (k5 baseline matrix),
+`round_k5_k7pair_chatq1/` and `round_k5_k7pair_chatq2/` (k5 quality passes),
+`round_k7_20261022T124251Z/` (k7 matrix plus `k7_pair_analysis.json`),
+`round_k7_chatq1/` and `round_k7_chatq2/` (k7 quality passes),
+`round_k7_boot_20261022T123333Z/` (k7 boot and shutdown snapshots),
+`round_k5_restore_20261022T125508Z/` (restored k5),
+`compare_k7_20261022T125136Z.txt` and `k7_result_20261022T130500Z.json`.
 
 **TTFT is not pure prefill.** It includes request, chat-template and network
 overhead. Prefill figures elsewhere in `PLAN.md` are "effective" rates that
@@ -396,11 +441,28 @@ disabled, `max_tokens=1024`, natural stop): three configurations × two passes �
 | k3 | 15/16 | 15/16 | 8/8 |
 | k5 | 15/16 | 14/16 | 8/8 |
 
-`codeedit-b` fails its `page_bounds` probe in every pass, including k0; this is
-a prompt/baseline limitation. k5 pass 2 adds one `codegen-b` discordance
+`codeedit-b` fails in every pass, including k0: the generated module defines
+`total_pages()` and omits the required `page_bounds` symbol, so the requested
+public surface is incomplete (the code parses; the contract still fails). k5
+pass 2 adds one `codegen-b` discordance
 (McNemar p=1.0). Greedy outputs are not bit-identical across passes even at k0
 (6/16 exact repeats at k0, 5/16 at k3, 7/16 at k5). **There is no lossless or
 formal quality claim.**
+
+The matched k5/k7 A/B added three natural-stop quality passes per configuration
+on the same official chat endpoint (thinking disabled, `max_tokens=1024`), 16
+greedy plus 8 sampled rows per pass:
+
+| config | pass 1 | pass 2 | pass 3 | sampled (all three) |
+|---|---:|---:|---:|---:|
+| k5 | 15/16 | 15/16 | 15/16 | 8/8 |
+| k7 (rejected) | 15/16 | 15/16 | 14/16 | 8/8 |
+
+k7 gains nothing. Its third pass misses `codegen-b`: the generated module
+exposes `failure_count` instead of the required consumer-visible `failures`
+attribute (it parses, 1567 chars, `finish_reason=stop`), so a caller that reads
+`failures` breaks. That is a public-surface requirement of the probe, not a
+harness or token-check artifact, and it is k7-only across the six passes.
 
 ### Memory
 
@@ -409,6 +471,14 @@ P7 weights are **88.93 GiB** including the drafter. At k5, GPU0 reports
 2,938 MiB free, so measured headroom is **~2.9–3.7 GiB**. The 97,887 MiB total
 includes driver/display reserve; free memory was measured, not derived. No run
 in the campaign OOMed.
+
+The k7 trial booted and served with no OOM. KV capacity **20,134 tokens**
+against k5's **20,227**, CUDA graph pool **0.09 GiB** against **0.08 GiB**, and
+one main plus one DSpark graph captured — the same count as k5. Boot to healthy
+was **502 s** for k7 and **461 s** for the restored k5. After the k7 timed run
+GPU0 read **95,398 MiB used / 1,852 MiB free**; the restored k5 read **93,536
+MiB used / 3,714 MiB free** at idle. Free memory is what the driver reported in
+each snapshot, never total-minus-used.
 
 ## Reproduce the measurements
 
@@ -445,6 +515,13 @@ python3 eval/dspark_workload_eval.py --execute --label k5 \
 
 # matched comparison of two completed runs
 python3 eval/dspark_workload_eval.py --compare <dir-a> <dir-b> --out-dir <cmp-dir>
+
+# matched k7 A/B: same harness, same prompts and budgets, one configuration
+# per run; compare needs the completed k5 and k7 directories
+python3 eval/dspark_workload_eval.py --execute --label k7 \
+  --out-dir <results-dir>/round_k7 --repeats 2 --warmup 2 \
+  --quality-sampled --overwrite --engine-container dsv41-dspark-k7
+python3 eval/dspark_workload_eval.py --compare <k5-dir> <k7-dir> --out-dir <cmp-dir>
 ```
 
 `--base-url` defaults to `http://127.0.0.1:8001`; `--seed 1017` and
