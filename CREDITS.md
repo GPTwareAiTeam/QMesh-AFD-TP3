@@ -97,26 +97,38 @@ vLLM-Moet authors`; the specific upstream file has no per-file copyright line.
 
 ## TensorFold and the GX kernel
 
-The shipped GX decode kernel (`gx/kernels/fp4_decode_moe_swz.cu`) is an
-independent QMesh NVFP4 implementation. TensorFold
+The shipped GX decode kernel (`gx/kernels/fp4_decode_moe_swz.cu`) is QMesh's
+NVFP4 implementation, distributed under the root MIT license. TensorFold
 ([`ashhart/TensorFold`](https://github.com/ashhart/TensorFold), commit
 `bd264368ae7382672faef6cc99c2add8b24c5ec0`, Apache-2.0, `Copyright 2026
-TensorFold contributors`) was consulted as a design starting point. The files
-examined were `zig/kernels/cuda/nvfp4_experts.cu` (blob
+TensorFold contributors`) is a confirmed design starting reference for this
+work. The files examined were `zig/kernels/cuda/nvfp4_experts.cu` (blob
 `afbaac8925b42bbce21adc98c64d317fda740f15`) and `mma4.cuh` (blob
 `6c905f55df09d0b91522b9e68e48daceb442d5b8`), together with TensorFold's
 `NOTICE` (blob `50e45b9ac90ea00ca45ab7afbdf3590b696e53d1`) and `LICENSE` (blob
 `d645695673349e3947e8e5ae42332d0ac3164cd7`).
 
+The current implementation is structurally different from the reviewed
+TensorFold kernel: it uses a two-stage, one-warp-per-`(pair,n)` then
+one-warp-per-output-row mapping with scalar FP32 dot products, whereas
+`nvfp4_experts.cu` maps one warp per `(expert, 32-column block)` and uses bf16
+`mma.sync.m16n8k16`; `mma4.cuh`'s block-scaled `mxf4nvf4` path is not called.
+No shared QMesh/TensorFold function or type names were identified.
+
 After stripping comments and tokenizing, the shipped v7 kernel has a
 difflib sequence ratio of 0.069 against `nvfp4_experts.cu`. The longest
 matching blocks are 14 generic tokens (PTX register constraints, an unrolled
-loop header, standard includes); there are no shared QMesh/TensorFold function
-or type names. The excluded v6 kernel, which is not shipped in this
-repository, gives 0.070 and the same generic-only matches. On that evidence,
-TensorFold is a design reference, not copied source; no TensorFold source code
-is redistributed. The GX kernel remains MIT-licensed QMesh code, with the
-TensorFold acknowledgment in its header.
+loop header, standard includes). The excluded v6 kernel, which is not shipped
+in this repository, gives 0.070 and the same generic-only matches. This
+comparison is corroborating evidence only: it shows no long verbatim token
+match with `nvfp4_experts.cu`, not proof of independent creation; it does not
+cover `mma4.cuh`, the DSV4.1 Zig block plan, or v1/v2, and no file-level
+TensorFold diff survives for those kernels. No preserved TensorFold source
+copy, patch, or source header has been identified in the repository or the
+reviewed kernel chain, and the provenance of the initial prototype is not
+established. No TensorFold source is included in this repository. The GX
+kernel remains QMesh code under the root MIT license, with the TensorFold
+acknowledgment in its header.
 
 The GX decode kernel's block-scale layout follows vLLM's documented
 `nvfp4_utils.swizzle_blockscale` convention (Apache-2.0, `Copyright
@@ -251,10 +263,15 @@ clearance.
    The weights and rank packs are not in this repository. If they are published
    separately, include the upstream MIT notice and verify the transcode's
    provenance.
-5. **TensorFold attribution treatment.** The token comparison above found no
-   copied TensorFold source text in the shipped or excluded QMesh kernels. On
-   that evidence the GX kernel remains MIT-licensed QMesh code with a
-   design-reference acknowledgment, and no TensorFold NOTICE is added. A
+5. **TensorFold attribution treatment.** TensorFold is a confirmed design
+   starting reference. The token comparison found no long verbatim match with
+   `nvfp4_experts.cu`, and no preserved TensorFold source copy has been
+   identified in the shipped or excluded QMesh kernels. That evidence does not
+   establish the provenance of the initial prototype. The GX kernel is QMesh
+   code offered under the root MIT license with a design-reference
+   acknowledgment; no TensorFold NOTICE is added because no TensorFold source
+   is redistributed. This records QMesh's attribution treatment; it is not a
+   legal conclusion about upstream material outside the preserved record. A
    reviewer may confirm this treatment.
 6. **Not legal advice.** A reviewer should confirm the collective copyright
    line, the mHC attribution, and the native authorization before a formal

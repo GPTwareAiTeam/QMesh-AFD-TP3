@@ -14,7 +14,7 @@ This work builds on substantial upstream contributions:
 
 - **[DeepSeek](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)** — the model and DSpark draft weights; **[LibertAI](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-NVFP4)** — the NVFP4 checkpoint/transcode.
 - **[vLLM](https://github.com/vllm-project/vllm)** and **[kacper-daftcode / vLLM-Moet](https://github.com/kacper-daftcode/vLLM-Moet)** — the serving foundation, SM120 integration, and upstream code. Our mHC kernels are **modified vLLM-Moet derivatives**, not independent QMesh implementations; those kernels and the copied runtime overlays remain **Apache-2.0**.
-- **[TensorFold](https://github.com/ashhart/TensorFold)** — an expert-kernel design reference; **[DeepInfer](https://github.com/deepseek-ai/DeepInfer)** — investigated scheduling and retention design references, not a deployed replacement engine.
+- **[TensorFold](https://github.com/ashhart/TensorFold)** — a confirmed design starting reference for the GX NVFP4 decode kernel; the current implementation is structurally different, no preserved TensorFold source copy has been identified, and the initial prototype's provenance is not established. **[DeepInfer](https://github.com/deepseek-ai/DeepInfer)** — investigated scheduling and retention design references, not a deployed replacement engine.
 - **[DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)**, **[NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass)**, **[FlashInfer](https://github.com/flashinfer-ai/flashinfer)**, and the other runtime dependencies listed in **[CREDITS.md](CREDITS.md)**.
 
 QMesh contributes the distributed expert partitioning, native transport,
@@ -492,11 +492,14 @@ container/GPU counters when available; `--no-metrics` disables that.
   files, not the full vLLM or vLLM-Moet source trees; the engine image built
   from vLLM-Moet is an external dependency.
 - **GX kernels** `gx/kernels/ext_variant.cu` and
-  `gx/kernels/fp4_decode_moe_swz.cu` are original QMesh code under the root
-  MIT license. TensorFold's `nvfp4_experts.cu` and `mma4.cuh` were a design
-  reference and are acknowledged in `CREDITS.md`; no TensorFold source text is
-  copied. The decode kernel's block-scale layout follows vLLM's documented
-  `nvfp4_utils.swizzle_blockscale`; no vLLM source is copied into it.
+  `gx/kernels/fp4_decode_moe_swz.cu` are QMesh code under the root MIT
+  license. TensorFold's `nvfp4_experts.cu` and `mma4.cuh` were a confirmed
+  design starting reference and are acknowledged in `CREDITS.md`; the current
+  implementation is structurally different, and no preserved TensorFold source
+  copy has been identified in it. The preserved record does not establish the
+  provenance of the initial prototype. The decode kernel's block-scale layout
+  follows vLLM's documented `nvfp4_utils.swizzle_blockscale`; no vLLM source
+  is copied into it.
 - **Native transport sources** in `native/` are first-party QMesh code from
   the transport tree at commit `b88ec90fd2465d647dd250f7282c7a3716584c26`.
   The four seam files are byte-for-byte copies; `qmesh_afd_edge.cpp` and

@@ -203,6 +203,23 @@ pass "k=3 retention mounts + KV recipe + capture"
 expect_ok "SPEC_TOKENS=5 defaults" SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
 flat_has "capture_sizes\":[1,5,6]" || bad "k=5 capture is not [1,5,6]"
 
+expect_ok "SPEC_TOKENS=7 defaults" SPEC_TOKENS=7 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
+flat_has "capture_sizes\":[1,7,8]" || bad "k=7 capture is not [1,7,8]"
+flat_has "--max-cudagraph-capture-size 8" || bad "k=7 max capture is not 8"
+env_is "SPEC_TOKENS=7" || bad "k=7 SPEC_TOKENS not passed through"
+env_is "GPU_MEM_UTIL=0.97" || bad "k=7 GPU_MEM_UTIL not passed through"
+env_is "KV_RECORD=nvfp4" || bad "k=7 KV_RECORD not pinned"
+env_is "INDEXER_KV_DTYPE=mxfp4" || bad "k=7 INDEXER_KV_DTYPE not pinned"
+env_is "KV_MODE=auto" || bad "k=7 KV_MODE not pinned"
+env_is "KV_OFFLOAD_GIB=0" || bad "k=7 KV_OFFLOAD_GIB not pinned"
+flat_has "DOCKER_EXTRA AFD_NUM_EXPERTS=384" || bad "k=7 AFD_NUM_EXPERTS not set"
+flat_has "$PKG/overlay/vllm/v1/core/kv_cache_planning.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_planning.py:ro" ||
+  bad "k=7 retention kv_cache_planning.py mount missing"
+flat_has "$PKG/overlay/vllm/v1/attention/backends/mla/sparse_swa.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/sparse_swa.py:ro" ||
+  bad "k=7 retention sparse_swa.py mount missing"
+[[ "$OUT" == *"extra_retained_tokens=8"* ]] || bad "k=7 retention bound not logged as k+1"
+pass "k=7 default capture [1,7,8], exact-8 retention, KV recipe"
+
 expect_ok "SPEC_TOKENS=2 explicit captures" SPEC_TOKENS=2 CAPTURE_SIZES=1,2,3 \
   GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
 flat_has "capture_sizes\":[1,2,3]" || bad "k=2 explicit capture list not passed"
@@ -211,7 +228,7 @@ expect_ok "util .98 with DSPARK_MEM_ACK=1" SPEC_TOKENS=3 GPU_MEM_UTIL=0.98 \
   DSPARK_EXTRA_GIB=1.0 DSPARK_MEM_ACK=1
 
 # --- refusals ----------------------------------------------------------------
-expect_fail "SPEC_TOKENS=6 rejected" "SPEC_TOKENS must be 0..5" SPEC_TOKENS=6 \
+expect_fail "SPEC_TOKENS=6 rejected" "SPEC_TOKENS must be 0..5 or 7" SPEC_TOKENS=6 \
   GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
 expect_fail "k=2 without explicit captures rejected" "no validated capture default" \
   SPEC_TOKENS=2 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
@@ -219,6 +236,10 @@ expect_fail "k=3 list missing verify width rejected" "verify width 4" \
   SPEC_TOKENS=3 CAPTURE_SIZES=1,3 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
 expect_fail "k=3 list missing 1 rejected" "must include 1" \
   SPEC_TOKENS=3 CAPTURE_SIZES=3,4 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
+expect_fail "k=7 list missing verify width rejected" "verify width 8" \
+  SPEC_TOKENS=7 CAPTURE_SIZES=1,7 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
+expect_fail "k=7 list missing 1 rejected" "must include 1" \
+  SPEC_TOKENS=7 CAPTURE_SIZES=7,8 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0
 expect_fail "k=3 without GPU_MEM_UTIL rejected" "requires an explicit GPU_MEM_UTIL" \
   SPEC_TOKENS=3 DSPARK_EXTRA_GIB=1.0
 expect_fail "k=3 without DSPARK_EXTRA_GIB rejected" "requires explicit DSPARK_EXTRA_GIB" \
@@ -299,5 +320,5 @@ if (( fail )); then
   echo "FAILED"
   exit 1
 fi
-echo "PASS: launcher dry-run contract (non-spec rollback, k=1/2/3/5, retention mounts, memory guards, overlay hash guard)"
+echo "PASS: launcher dry-run contract (non-spec rollback, k=1/2/3/5/7, retention mounts, memory guards, overlay hash guard)"
 echo "PASS: edge helper DRY_RUN never reaches ssh/scp"

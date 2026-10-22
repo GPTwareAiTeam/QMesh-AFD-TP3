@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: 2026 QMesh contributors
 // SPDX-License-Identifier: MIT
 //
-// Original QMesh NVFP4 decode-MoE implementation. TensorFold's
-// `zig/kernels/cuda/nvfp4_experts.cu` and `mma4.cuh` (Copyright 2026 TensorFold
-// contributors, Apache-2.0) were consulted as a design reference; no TensorFold
-// source code is copied. The block-scale layout follows vLLM's
+// QMesh NVFP4 decode-MoE implementation, distributed under the root MIT
+// license. TensorFold's `zig/kernels/cuda/nvfp4_experts.cu` and `mma4.cuh`
+// (Copyright 2026 TensorFold contributors, Apache-2.0) were consulted as a
+// design starting reference. The current implementation is structurally
+// different from the reviewed TensorFold kernel, and no preserved TensorFold
+// source copy has been identified in this file. The provenance of any earlier
+// prototype is not established. The block-scale layout follows vLLM's
 // `nvfp4_utils.swizzle_blockscale` (Apache-2.0, Copyright contributors to the
 // vLLM project); no vLLM source code is copied into this file. See CREDITS.md.
 // Decode-row NVFP4 MoE body, v7: identical math and weight streaming to v6,
