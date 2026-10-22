@@ -747,7 +747,7 @@ drafter**; k5 reports **93,506 MiB used / 3,744 MiB free**, RG6 **94,262 /
 2,988**, and observed peak **94,312 MiB used with 2,938 MiB reported free**
 (earlier k5 snapshots 3,744 MiB), so measured headroom is **~2.9–3.7 GiB**.
 There was no OOM across 384 timed + 144 quality rows. Rebalancing remains
-ruled out. **>75 tok/s remains unmet; 120 tok/s was not reached.**
+ruled out. **>75 tok/s remains unmet; 120 tok/s was not reached per request.**
 
 ### 2026-10-22 k7 trial (REJECTED; k5 retained)
 
@@ -804,3 +804,24 @@ scripts/launch_engine_graphs.sh`. Artifacts (eval results directory, untracked):
 `round_k7_chatq1/`, `round_k7_chatq2/`, `round_k7_boot_20261022T123333Z/`,
 `round_k5_restore_20261022T125508Z/`, `compare_k7_20261022T125136Z.txt`,
 `k7_result_20261022T130500Z.json`.
+
+### 2026-10-22 concurrency / 2 GiB KV campaign
+
+A separate 2 GiB explicit-KV campaign (64/64 groups, 240/240 measured
+requests, zero invalid, zero preemptions) measured the retained k5 under 8×
+offered concurrency. Group prefill throughput was flat (**2,633.4 → 2,664.6
+tok/s, +1.2%**); group decode rose **1.90×** (**93.5 → 178.0**) while the
+per-request decode median fell **93.5 → 25.0 tok/s**. The 178.0 figure is a
+multi-request group rate, not the single-request 120 tok/s target; the best C1
+per-type median was 119.4 (tool-agent), so no 120 tok/s single-request result
+is established.
+
+Decode engine intervals overlap exactly **1/2/4/8** at C1/2/4/8, so all eight
+requests are resident and receive tokens. Prefill scheduled-to-last overlap
+peaks at **2** because one 2048-token prompt fills
+`MAX_NUM_BATCHED_TOKENS=2048`; C8 prefill is a queued control (median queue
+wait 1,920 ms), not eight parallel prefills. The 2 GiB pool reported
+**2,073,385 tokens**, **1.9773×** maximum native concurrency at a configured
+1,048,576-token limit, and **572 MiB** campaign minimum free; C8 added no
+measurable allocation. 3 GiB did not complete a real prefill. No 1M-token
+request was tested. Details: README Results and PLAN W9.

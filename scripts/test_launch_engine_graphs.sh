@@ -16,6 +16,9 @@ UNSETS=(
   -u EXP -u AFD_NATIVE_DIR -u AFD_BIN_DIR -u EDGES -u VLLM_SRC
   -u MODEL_DIR -u MODEL_MOUNT -u IMAGE -u AFD_CONFIG_FILE
   -u AFD_LAYERS -u AFD_ROWS -u GX1_HOST -u GX2_HOST -u DSV41_SKIP_LOCAL_ENV
+  -u MAX_MODEL_LEN -u MAX_NUM_SEQS -u MAX_NUM_BATCHED_TOKENS
+  -u KV_CACHE_GIB -u KV_CACHE_BYTES -u DSPARK_ENGINE_EVENT_FILE
+  -u NATIVE_CTX_MEM -u NATIVE_CTX_MEM_DIR
 )
 TMPDIRS=()
 cleanup() { for d in "${TMPDIRS[@]:-}"; do [[ -n "$d" ]] && rm -rf "$d"; done; }
@@ -37,6 +40,12 @@ case "$1 $2" in
       *\.Id*) echo sha256:9a21de6e8ba7ade4df4590841401edd09c406638ad21bb22d6f170c297d0f404 ;;
       *) exit 1 ;;
     esac
+    ;;
+  "run --rm")
+    # `docker run --rm ... --entrypoint cat IMAGE PATH` in the launcher: serve
+    # the fixture image tree so only a real container path resolves.
+    for _arg in "$@"; do _path=$_arg; done
+    exec cat "${STUB_IMAGE:?}$_path"
     ;;
   *) exit 1 ;;
 esac
@@ -83,7 +92,8 @@ JSON
 BASE=(DRY_RUN=1 SKIP_EDGES=1 GPU_TOTAL_MIB=97887 NAME=launch-test
       DSV41_SKIP_LOCAL_ENV=1 AFD_NATIVE_DIR="$FIX/native" AFD_BIN_DIR="$FIX/bin"
       VLLM_SRC="$FIX/vllm" MODEL_DIR="$FIX/model" IMAGE=test-image:v1
-      AFD_CONFIG_FILE="$CONFIG" AFD_LAYERS=40 AFD_ROWS=4096 PATH="$FIX/bin:$PATH")
+      AFD_CONFIG_FILE="$CONFIG" AFD_LAYERS=40 AFD_ROWS=4096 PATH="$FIX/bin:$PATH"
+      STUB_IMAGE="$FIX/image")
 
 fail=0
 OUT=""
@@ -117,6 +127,7 @@ expect_fail() {
 env_is() { grep -Fxq "ENV $1" <<<"$OUT"; }
 env_absent() { ! grep -q "^ENV $1" <<<"$OUT"; }
 flat_has() { [[ "$FLAT" == *"$1"* ]]; }
+flat_count() { grep -o -- "$1" <<<"$FLAT" | wc -l; }
 
 # Edge-helper seam: any ssh/scp attempt leaves a marker and fails. The helper's
 # DRY_RUN path must exit before this directory is used.
@@ -166,6 +177,11 @@ env_is "GPU_MEM_UTIL=0.90" || bad "non-spec GPU_MEM_UTIL=0.90 default lost"
 env_absent "KV_" || bad "non-spec launch sets a KV_* override"
 flat_has "capture_sizes\":[1]" || bad "non-spec capture list is not [1]"
 flat_has "--max-cudagraph-capture-size 1" || bad "non-spec max capture is not 1"
+env_is "MAX_MODEL_LEN=8192" || bad "default MAX_MODEL_LEN is not 8192"
+env_is "MAX_NUM_SEQS=1" || bad "default MAX_NUM_SEQS is not 1"
+env_is "MAX_NUM_BATCHED_TOKENS=4096" || bad "default MAX_NUM_BATCHED_TOKENS is not 4096"
+[[ "$OUT" != *"--kv-cache-memory-bytes"* ]] || bad "default launch emits an explicit KV size"
+[[ "$OUT" != *"DSPARK_ENGINE_EVENT_FILE"* ]] || bad "default launch enables the engine event hook"
 [[ "$OUT" != *"DOCKER_EXTRA AFD_NUM_EXPERTS=384"* ]] || bad "non-spec launch gained AFD_NUM_EXPERTS"
 [[ "$OUT" != *"$PKG/overlay"* ]] || bad "non-spec launch mounts the retention overlay"
 pass "non-spec args unchanged (no retention, no KV_*, util .90, capture 1)"
@@ -226,6 +242,80 @@ flat_has "capture_sizes\":[1,2,3]" || bad "k=2 explicit capture list not passed"
 
 expect_ok "util .98 with DSPARK_MEM_ACK=1" SPEC_TOKENS=3 GPU_MEM_UTIL=0.98 \
   DSPARK_EXTRA_GIB=1.0 DSPARK_MEM_ACK=1
+
+# --- explicit context/cache/concurrency (benchmark contract) -----------------
+expect_ok "k=5 C=2 derives exact target captures" SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 \
+  DSPARK_EXTRA_GIB=1.0 MAX_NUM_SEQS=2
+flat_has "capture_sizes\":[1,5,6,12]" || bad "k=5 C=2 capture is not [1,5,6,12]"
+flat_has "--max-cudagraph-capture-size 12" || bad "k=5 C=2 max capture is not 12"
+
+expect_ok "k=5 C=4 derives exact target captures" SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 \
+  DSPARK_EXTRA_GIB=1.0 MAX_NUM_SEQS=4
+flat_has "capture_sizes\":[1,5,6,12,24]" || bad "k=5 C=4 capture is not [1,5,6,12,24]"
+flat_has "--max-cudagraph-capture-size 24" || bad "k=5 C=4 max capture is not 24"
+
+expect_ok "k=5 C=8 derives exact target captures" SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 \
+  DSPARK_EXTRA_GIB=1.0 MAX_NUM_SEQS=8
+flat_has "capture_sizes\":[1,5,6,12,24,48]" || bad "k=5 C=8 capture is not [1,5,6,12,24,48]"
+flat_has "--max-cudagraph-capture-size 48" || bad "k=5 C=8 max capture is not 48"
+
+expect_ok "native 1M C=8 k=5 benchmark render" SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 \
+  DSPARK_EXTRA_GIB=1.0 MAX_MODEL_LEN=1048576 MAX_NUM_SEQS=8 \
+  MAX_NUM_BATCHED_TOKENS=4096 KV_CACHE_GIB=3 \
+  CAPTURE_SIZES=1,5,6,12,24,48 MAX_CAPTURE=48 \
+  DSPARK_ENGINE_EVENT_FILE=/tmp/afd_dump/cwb-engine-events.jsonl
+env_is "MAX_MODEL_LEN=1048576" || bad "native 1M MAX_MODEL_LEN not passed"
+env_is "MAX_NUM_SEQS=8" || bad "C=8 MAX_NUM_SEQS not passed"
+env_is "MAX_NUM_BATCHED_TOKENS=4096" || bad "batched-token budget not passed"
+flat_has "capture_sizes\":[1,5,6,12,24,48]" || bad "benchmark capture list not passed"
+flat_has "--max-cudagraph-capture-size 48" || bad "benchmark max capture is not 48"
+[[ $(flat_count "--kv-cache-memory-bytes") == 1 ]] || bad "explicit KV flag is not emitted exactly once"
+flat_has "--kv-cache-memory-bytes 3221225472" || bad "3 GiB KV is not 3221225472 bytes"
+[[ $(flat_count "--max-cudagraph-capture-size") == 1 ]] || bad "launcher emits more than one capture scalar"
+grep -Fxq "DOCKER_EXTRA -e" <<<"$OUT" || bad "event flag lacks its -e element"
+grep -Fxq "DOCKER_EXTRA DSPARK_ENGINE_EVENT_FILE=/tmp/afd_dump/cwb-engine-events.jsonl" <<<"$OUT" ||
+  bad "opt-in event file not passed to the container"
+[[ "$OUT" != *"--enforce-eager"* ]] || bad "benchmark render unexpectedly eager"
+pass "native 1M C=8 contract: context, 3 GiB KV, exact captures, opt-in event"
+
+expect_ok "KV_CACHE_BYTES is equivalent to KV_CACHE_GIB" SPEC_TOKENS=5 \
+  GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 KV_CACHE_BYTES=3221225472
+flat_has "--kv-cache-memory-bytes 3221225472" || bad "KV_CACHE_BYTES not passed verbatim"
+
+# --- refusals: context/cache/event knobs ------------------------------------
+expect_fail "MAX_MODEL_LEN above native cap rejected" \
+  "exceeds native max_position_embeddings 1048576" SPEC_TOKENS=5 \
+  GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 MAX_MODEL_LEN=1048577
+expect_fail "MAX_NUM_SEQS=0 rejected" "MAX_NUM_SEQS must be a positive integer" \
+  SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 MAX_NUM_SEQS=0
+expect_fail "batched tokens below concurrency rejected" \
+  "must be >= MAX_NUM_SEQS=8" SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 \
+  MAX_NUM_SEQS=8 MAX_NUM_BATCHED_TOKENS=4
+expect_fail "batched tokens above context*seqs rejected" \
+  "exceeds MAX_NUM_SEQS*MAX_MODEL_LEN" SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 \
+  DSPARK_EXTRA_GIB=1.0 MAX_MODEL_LEN=1 MAX_NUM_BATCHED_TOKENS=4096
+expect_fail "batched tokens below largest capture rejected" \
+  "smaller than the largest emitted capture size 48" SPEC_TOKENS=5 \
+  GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 MAX_NUM_SEQS=8 \
+  MAX_NUM_BATCHED_TOKENS=32
+expect_fail "MAX_CAPTURE above list max rejected" \
+  "must equal the largest capture size (48)" SPEC_TOKENS=5 \
+  GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 MAX_NUM_SEQS=8 \
+  CAPTURE_SIZES=1,5,6,12,24,48 MAX_CAPTURE=64
+expect_fail "KV_CACHE_GIB=0 rejected" "KV_CACHE_GIB must be a positive integer" \
+  SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 KV_CACHE_GIB=0
+expect_fail "KV_CACHE_BYTES non-integer rejected" \
+  "KV_CACHE_BYTES must be a positive integer" SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 \
+  DSPARK_EXTRA_GIB=1.0 KV_CACHE_BYTES=3g
+expect_fail "conflicting KV_GIB/KV_BYTES rejected" "disagrees with KV_CACHE_BYTES" \
+  SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 \
+  KV_CACHE_GIB=3 KV_CACHE_BYTES=3221225473
+expect_fail "C=8 list missing 48 rejected" "exact target width 48" SPEC_TOKENS=5 \
+  GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 MAX_NUM_SEQS=8 \
+  CAPTURE_SIZES=1,5,6,12,24
+expect_fail "event file outside /tmp/afd_dump rejected" "must be under /tmp/afd_dump" \
+  SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1.0 \
+  DSPARK_ENGINE_EVENT_FILE=/tmp/engine-events.jsonl
 
 # --- refusals ----------------------------------------------------------------
 expect_fail "SPEC_TOKENS=6 rejected" "SPEC_TOKENS must be 0..5 or 7" SPEC_TOKENS=6 \
@@ -316,9 +406,47 @@ else
   bad "retention package self-check"
 fi
 
+# --- native-context indexer bound + mxfp8 dequant ----------------------------
+# The launcher must mount both files at the paths the engine imports and
+# preflight the image bytes there. The fixture image tree mirrors the image
+# layout; a doubled `vllm/vllm` destination has no file here and cannot pass.
+NPKG=$ROOT/p7/native_context_memory
+NCTX_REL=vllm/v1/attention/backends/mla/indexer.py
+NCTX_DEST=/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/indexer.py
+NCTX_MXFP8_REL=vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+NCTX_MXFP8_DEST=/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+mkdir -p "$FIX/image${NCTX_DEST%/*}" "$FIX/image${NCTX_MXFP8_DEST%/*}"
+cp "$NPKG/src/$NCTX_REL" "$FIX/image$NCTX_DEST"
+cp "$NPKG/src/$NCTX_MXFP8_REL" "$FIX/image$NCTX_MXFP8_DEST"
+
+expect_ok "NATIVE_CTX_MEM=1 mounts the imported paths" NATIVE_CTX_MEM=1
+flat_has "$NPKG/overlay/$NCTX_REL:$NCTX_DEST:ro" ||
+  bad "native-context indexer mount is not the imported path"
+flat_has "$NPKG/overlay/$NCTX_MXFP8_REL:$NCTX_MXFP8_DEST:ro" ||
+  bad "native-context mxfp8 mount is not the imported path"
+(( $(flat_count "vllm/vllm") == 0 )) || bad "native-context mount uses a doubled vllm path"
+flat_has "native-context-memory overlay on (factor=" || bad "native-context overlay not enabled"
+pass "NATIVE_CTX_MEM=1 two-path mount"
+
+expect_ok "NATIVE_CTX_MEM=0 default" NATIVE_CTX_MEM=0
+(( $(flat_count "native_context_memory/overlay") == 0 )) || bad "native-context mounts while off"
+pass "NATIVE_CTX_MEM=0 mounts nothing"
+
+printf '\n# drift\n' >>"$FIX/image$NCTX_DEST"
+expect_fail "native-context image destination verified" "not the pinned image source" NATIVE_CTX_MEM=1
+cp "$NPKG/src/$NCTX_REL" "$FIX/image$NCTX_DEST"
+rm -f "$FIX/image$NCTX_DEST"
+expect_fail "native-context missing image path rejected" "not the pinned image source" NATIVE_CTX_MEM=1
+cp "$NPKG/src/$NCTX_REL" "$FIX/image$NCTX_DEST"
+printf '\n# drift\n' >>"$FIX/image$NCTX_MXFP8_DEST"
+expect_fail "native-context mxfp8 image destination verified" "not the pinned image source" NATIVE_CTX_MEM=1
+cp "$NPKG/src/$NCTX_MXFP8_REL" "$FIX/image$NCTX_MXFP8_DEST"
+pass "native-context image preflight rejects drift/missing path"
+
 if (( fail )); then
   echo "FAILED"
   exit 1
 fi
 echo "PASS: launcher dry-run contract (non-spec rollback, k=1/2/3/5/7, retention mounts, memory guards, overlay hash guard)"
+echo "PASS: native-context overlay mount = imported path, image preflight"
 echo "PASS: edge helper DRY_RUN never reaches ssh/scp"

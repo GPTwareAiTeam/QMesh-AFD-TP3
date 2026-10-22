@@ -34,6 +34,19 @@ Modified by QMesh (2026) for the DSV4.1 AFD-TP3 experiment:
 - p7/dspark_retention/overlay/vllm/v1/attention/backends/mla/sparse_swa.py
   DSpark retention: map context positions in the null SWA block (block 0) to
   slot -1 so they cannot alias real KV; other paths are unchanged.
+- p7/native_context_memory/overlay/vllm/v1/attention/backends/mla/indexer.py
+  Native 1M context memory: `get_max_prefill_buffer_size` returns
+  `max_model_len * factor`, the exact per-chunk bound already enforced by
+  `_split_indexer_prefill_chunks` and used as the K-gather workspace rows,
+  instead of `max_model_len * (576 * 2 // 132) * factor`, the flashmla_sparse
+  envelope that the served FLASHINFER_MLA_SPARSE_DSV41 backend never
+  allocates. Chunk arithmetic, scores, top-k, KV layout and `max_model_len`
+  are unchanged.
+- p7/native_context_memory/overlay/vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+  Native 1M memory: `dequant_mxfp8_to_bf16` reuses the fresh float32
+  `x.to(torch.float32)` copy with an in-place broadcast multiply instead of
+  allocating a second weight-sized float32 temporary (128 MiB for `wo_a` at
+  `[8192, 4096]`); the float32 multiply and bf16 cast are unchanged.
 
 The two `p7/dspark_retention/src/...` files below are unmodified copies of
 files extracted from the same image. Their SHA-256 values are pinned in
@@ -43,7 +56,14 @@ complete provenance and carry no additional modification notice.
 - p7/dspark_retention/src/vllm/v1/core/kv_cache_planning.py
 - p7/dspark_retention/src/vllm/v1/attention/backends/mla/sparse_swa.py
 
-The five modified overlay files and the two unmodified `src/` extracts retain
+The two `p7/native_context_memory/src/...` files below are unmodified copies
+from the same image, pinned by SHA-256 in
+`p7/native_context_memory/manifest.txt` and `package.sh`:
+
+- p7/native_context_memory/src/vllm/v1/attention/backends/mla/indexer.py
+- p7/native_context_memory/src/vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+
+The seven modified overlay files and the four unmodified `src/` extracts retain
 their upstream Apache-2.0 and vLLM copyright headers. The mHC-derived files
 add the headers listed below.
 

@@ -31,14 +31,20 @@ The non-spec round reached a median **56.86 tok/s** (5 × 256-token runs,
 +2.1376% over the 55.67 tok/s round baseline). With DSpark, the best median was
 **102.82 tok/s** in the long-decode condition (k5, 128 prompt / 1024 completion)
 and **82.13 tok/s** in the short-decode condition (k3, 1024 prompt / 128
-completion). The **120 tok/s target was not reached** in any aggregate, and no
-lossless or formal quality claim is made.
+completion). The **120 tok/s target was not reached by any per-request or
+aggregate-pair median, and no lossless or formal quality claim is made.
 
 A matched k5/k7 A/B then measured `SPEC_TOKENS=7` (captures 1,7,8, max 8)
 against the retained k5 under the same engine budget: k5 **77.84 / 105.07
 tok/s**, k7 **67.67 / 95.97 tok/s** (short / long decode), **−13.07% / −8.65%**,
 acceptance **0.6918 vs 0.5486**, and no quality gain (**15/16** in all three k5
 passes vs **15/16, 15/16, 14/16** at k7). k7 was rejected and k5 restored.
+
+A 2 GiB explicit KV pool then served 240/240 valid concurrency requests at
+C1/2/4/8 on the same k5 stack. For 8× offered concurrency, group decode
+throughput rose 1.90× and group prefill stayed flat (+1.2%), while per-request
+latency rose; C1 is the latency-optimal point. A 3 GiB attempt did not complete
+a real prefill.
 
 ## Getting started
 
@@ -320,8 +326,9 @@ required; `AFD_BIN_DIR` must contain the built extension. `IMAGE` defaults to
    ```
 
    `/health` becomes ready after roughly 261–337 s (FlashInfer autotune). The
-   engine serves on `127.0.0.1:8001` with `MAX_MODEL_LEN=8192`,
-   `MAX_NUM_SEQS=1` and `MAX_NUM_BATCHED_TOKENS=4096`; prefix caching is off.
+   launcher's defaults are `MAX_MODEL_LEN=8192`, `MAX_NUM_SEQS=1` and
+   `MAX_NUM_BATCHED_TOKENS=4096`; prefix caching is off. These are defaults,
+   not the concurrency recipe below.
 
    The included `scripts/restart_afd_edges.sh` starts one edge process per GX
    host before the engine. It reads the peer addresses from `AFD_CONFIG_FILE`,
@@ -346,6 +353,23 @@ SPEC_TOKENS=7 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1 \
 CAPTURE_SIZES=1,7,8 MAX_CAPTURE=8 DSPARK_MEM_ACK=1 NAME=dsv41-dspark-k7 \
 bash scripts/launch_engine_graphs.sh
 ```
+
+For the concurrency / 2 GiB KV campaign:
+
+```bash
+SPEC_TOKENS=5 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1 \
+CAPTURE_SIZES=1,5,6,12,24,48 MAX_CAPTURE=48 \
+MAX_MODEL_LEN=1048576 MAX_NUM_SEQS=8 MAX_NUM_BATCHED_TOKENS=2048 \
+KV_CACHE_BYTES=2147483648 NATIVE_CTX_MEM=1 \
+EXTRA_DOCKER_ARGS="-e VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=64" \
+DSPARK_ENGINE_EVENT_FILE=/tmp/afd_dump/cwb-engine-events.jsonl \
+NAME=dsv41-dspark-c8-kv2g bash scripts/launch_engine_graphs.sh
+```
+
+`NATIVE_CTX_MEM=1` mounts the exact-bound indexer overlay, and
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=64` is passed through the container
+boundary as the campaign's explicit logits bound. The engine event file is
+opt-in and must live under `/tmp/afd_dump`, which is shared with the container.
 
 Non-spec launches default to `SPEC_TOKENS=0`, `GPU_MEM_UTIL=0.90` and
 `MHC_QUANT=1`. DSpark requires an explicit memory budget; the launcher has no
@@ -422,11 +446,78 @@ tracked): `round_k5_k7pair_20261022T122131Z/` (k5 baseline matrix),
 `round_k5_restore_20261022T125508Z/` (restored k5),
 `compare_k7_20261022T125136Z.txt` and `k7_result_20261022T130500Z.json`.
 
-**TTFT is not pure prefill.** It includes request, chat-template and network
-overhead. Prefill figures elsewhere in `PLAN.md` are "effective" rates that
-include decode and are not comparable to pure prefill kernels. Decode rates are
-the streaming decode-window rate derived from the endpoint's completion-token
-usage, never chunk counts.
+**Prefill here is request-level, not a kernel.** TTFT includes request,
+chat-template and network overhead. The concurrency campaign's engine prefill
+is `prompt_tokens / (first_token_ts - scheduled_ts)`, so it includes the first
+generated token and scheduler interleaving. Neither figure is comparable to a
+pure prefill kernel. Decode rates are the streaming decode-window rate derived
+from the endpoint's completion-token usage, never chunk counts.
+
+### Concurrency and KV-cache campaign (2026-10-22)
+
+One boot configured for native 1,048,576 tokens (no 1M request was sent) with
+an explicit 2 GiB KV pool served the full matrix: **64/64 groups, 240/240
+measured requests, 32/32 warmup requests also valid**, zero preemptions.
+Prefill is **2048 prompt / 1 completion**; decode is **512 prompt / 2048
+completion**. Recipe: k5, `MAX_MODEL_LEN=1048576`, `MAX_NUM_SEQS=8`,
+`MAX_NUM_BATCHED_TOKENS=2048`, captures `1,5,6,12,24,48`,
+`NATIVE_CTX_MEM=1`, prefix caching off.
+
+Engine prefill is `prompt_tokens / (first_token_ts - scheduled_ts)`; stream
+decode is `(usage.completion_tokens - len(first_chunk_token_ids)) /
+(last_token_arrival - first_token_arrival)`. Group prefill is
+`sum(prompt_tokens) / (last first_token - gate release)`; group decode is
+`sum(decode_tokens_after_first) / (last token - first token)`. Median and peak
+are over valid requests; peak is the single fastest request, not a sustained
+rate.
+
+| type | C | n | prefill med | prefill peak | decode med | decode peak |
+|---|---:|---:|---:|---:|---:|---:|
+| code | 1 | 2 | 2,651.6 | 2,652.1 | 95.8 | 99.7 |
+| code | 2 | 4 | 1,815.3 | 2,089.4 | 73.9 | 75.2 |
+| code | 4 | 8 | 1,438.1 | 2,088.6 | 42.1 | 43.1 |
+| code | 8 | 16 | 1,335.7 | 2,089.1 | 28.4 | 32.0 |
+| prose | 1 | 2 | 2,673.2 | 2,676.6 | 88.9 | 95.0 |
+| prose | 2 | 4 | 1,828.1 | 2,103.7 | 65.6 | 74.6 |
+| prose | 4 | 8 | 1,448.7 | 2,100.9 | 32.7 | 39.8 |
+| prose | 8 | 16 | 1,342.9 | 2,099.0 | 23.7 | 28.9 |
+| json | 1 | 2 | 2,651.8 | 2,652.8 | 78.7 | 81.4 |
+| json | 2 | 4 | 1,818.8 | 2,096.5 | 49.7 | 57.5 |
+| json | 4 | 8 | 1,438.9 | 2,101.2 | 30.5 | 34.3 |
+| json | 8 | 16 | 1,336.3 | 2,098.6 | 20.8 | 25.3 |
+| toolagent | 1 | 2 | 2,615.7 | 2,615.8 | 119.4 | 135.0 |
+| toolagent | 2 | 4 | 1,786.0 | 2,055.7 | 69.3 | 74.0 |
+| toolagent | 4 | 8 | 1,418.3 | 2,059.7 | 44.0 | 45.9 |
+| toolagent | 8 | 16 | 1,314.7 | 2,058.4 | 31.1 | 31.9 |
+
+C1 is the latency-optimal point. From C1 to C8, group prefill was flat
+(**2,633.4 → 2,664.6 tok/s, +1.2%**) while group decode rose **1.90×**
+(**93.5 → 178.0**) for 8× offered concurrency. Per-request medians fell from
+**2,651.6 → 1,336.4** (prefill; includes the first token and interleaving) and
+**93.5 → 25.0** (decode). Group walls rose **0.781 → 6.152 s** (prefill) and
+**22.328 → 93.107 s** (decode).
+
+The **120 tok/s target is a single-stream, per-request target**, not a
+multi-request throughput target: the 178.0 tok/s C8 value is a group aggregate
+across eight concurrent requests, not a per-request result.
+The overall per-request decode median is **93.5 at C1 and 25.0 at C8**, and the
+best per-type C1 median is **119.4** (tool-agent), so this campaign does not
+establish a 120 tok/s single-request result.
+
+Decode residency is real: request-scoped `[scheduled, last]` overlap is exactly
+**1/2/4/8** at C1/2/4/8 for every type and repeat, and all C requests receive
+tokens. Prefill cannot be: one 2048-token prompt fills
+`MAX_NUM_BATCHED_TOKENS=2048`, so scheduled-to-last overlap peaks at **2** at
+C2/4/8; resident `[queued, finished]` overlap is **1/2/4/8** with median queue
+wait **0 / 0 / 385 / 1,920 ms**. The C8 prefill group is therefore a queued
+control, not eight parallel prefills. `/metrics` group summaries are sampled
+after completion; an independent 250 ms watcher over the last 20 groups
+recorded decode running **1/2/4/8** and C8 prefill running **1** / waiting
+**6**. Its cache-usage gauge reported 0.0 throughout and is unusable.
+
+The 2 GiB pool, the 572 MiB campaign minimum and the failed 3 GiB attempt are
+in [Memory](#memory). The 2,073,385-token and 1.98× figures there are admission
+arithmetic, not a measured 1M-token request.
 
 ### Quality
 
@@ -479,6 +570,28 @@ GPU0 read **95,398 MiB used / 1,852 MiB free**; the restored k5 read **93,536
 MiB used / 3,714 MiB free** at idle. Free memory is what the driver reported in
 each snapshot, never total-minus-used.
 
+The concurrency campaign used an explicit **2 GiB KV pool** on the same k5
+stack. The engine reported **18,320 blocks × 117,216 B = 2,147,397,120 B**
+(86,528 B spare), block size **128**, `nvfp4_ds_mla`, **2,073,385 tokens**, and
+**1.98×** maximum native concurrency at the configured 1,048,576-token limit.
+`nvidia-smi` measured **1,222 MiB** minimum free during boot and **572 MiB** for
+every campaign sample (7,612 samples, 19:57:16–20:34:38Z); used held at
+**96,678 MiB** from before warmups through the last C8 group, so C8 added no
+measurable allocation above that watermark. A **1,656 MiB** post-boot idle
+snapshot preceded the campaign. There was no OOM, no preemption and no measured
+leak.
+
+At the 572 MiB floor, a **512 MiB** reserve allows only **+60 MiB** of cache
+(**2.06 GiB**, +537 blocks / +68,703 tokens); a 1 GiB reserve leaves no room.
+The 2 GiB pool was selected because a 3 GiB attempt did not complete a real
+prefill even after the indexer-bound and temporary-allocation fixes; 3 GiB is
+not claimed fit.
+
+The token and concurrency figures are pool/admission arithmetic, not a measured
+1M-token request. `MAX_MODEL_LEN` was **1,048,576**, but the largest prompt
+tested is **2048 tokens** and the largest total is **2560**; no long-context or
+1M-request claim follows.
+
 ## Reproduce the measurements
 
 The Python-side transport proof runs without loading model weights:
@@ -523,6 +636,24 @@ python3 eval/dspark_workload_eval.py --execute --label k7 \
 python3 eval/dspark_workload_eval.py --compare <k5-dir> <k7-dir> --out-dir <cmp-dir>
 ```
 
+The concurrency / KV campaign uses its own harness against the same endpoint:
+
+```bash
+python3 eval/concurrency_workload_eval.py \
+  --base-url http://127.0.0.1:8001 \
+  --out <results-dir>/campaign \
+  --types code,prose,json,toolagent --shapes prefill,decode \
+  --concurrency 1,2,4,8 --repeats 2 --warmup 1 \
+  --engine-event-file /tmp/afd_dump/cwb-engine-events.jsonl \
+  --require-engine-events --strict \
+  --cache-capacity-json <results-dir>/cache_capacity_c8_kv2g.json \
+  --overwrite
+```
+
+`--cache-capacity-json` is the block-arithmetic input used for the capacity
+cross-check, not an engine measurement. `--require-engine-events` rejects rows
+without a request-scoped engine event.
+
 `--base-url` defaults to `http://127.0.0.1:8001`; `--seed 1017` and
 `--timeout` are configurable. `--quality-only --quality-mode chat` runs the
 quality probes without timed replay. `--engine-container` additionally samples
@@ -532,7 +663,7 @@ container/GPU counters when available; `--no-metrics` disables that.
 
 | Path | Contents |
 |---|---|
-| `PLAN.md` | Full implementation plan: topology, memory ledger, workstreams W0–W8, gates, risks, DeepInfer review, DSpark results |
+| `PLAN.md` | Full implementation plan: topology, memory ledger, workstreams W0–W9, gates, risks, DeepInfer review, DSpark and concurrency results |
 | `GX_FP4_DECODE_CEILING.md` | Kernel and transport ceiling measurements behind the decode-rate limits |
 | `INVENTORY.md` | Measured host, network, memory, NVMe and transport numbers, with site identifiers removed |
 | `gateA/` | Early transport benchmark, GX memory probe and summarized results |

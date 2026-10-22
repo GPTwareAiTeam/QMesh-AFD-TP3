@@ -13,7 +13,7 @@ It is not legal advice.
 | Original QMesh code, scripts, and documentation, except the carve-outs below | MIT | `Copyright (c) 2026 QMesh contributors`; root [`LICENSE`](LICENSE) |
 | `p7/mhc_quant/kernel/mhc_post_norm_sm120.cu` and `.py` | Apache-2.0 | vLLM-Moet and vLLM upstream attribution plus QMesh modifications; see below |
 | `gx/kernels/ext_variant.cu` and `gx/kernels/fp4_decode_moe_swz.cu` | MIT | `Copyright (c) 2026 QMesh contributors`; TensorFold and vLLM design-reference acknowledgment below |
-| Seven copied or modified vLLM/vLLM-Moet files (list below) | Apache-2.0 | Upstream vLLM/vLLM-Moet notices; [`third_party/vllm/LICENSE`](third_party/vllm/LICENSE), [`third_party/vllm/NOTICE`](third_party/vllm/NOTICE) |
+| Copied or modified vLLM/vLLM-Moet files (list below) | Apache-2.0 | Upstream vLLM/vLLM-Moet notices; [`third_party/vllm/LICENSE`](third_party/vllm/LICENSE), [`third_party/vllm/NOTICE`](third_party/vllm/NOTICE) |
 | `native/` transport sources | MIT | `Copyright (c) 2026 QMesh contributors`; root [`LICENSE`](LICENSE); origin commit recorded in [`native/PROVENANCE.md`](native/PROVENANCE.md) |
 | Model weights and rank packs | MIT (upstream) | `Copyright (c) 2023 DeepSeek`; not included in this repository |
 
@@ -43,10 +43,20 @@ Copied or modified files retained in this repository:
 - `p7/dspark_retention/src/vllm/v1/core/kv_cache_planning.py` (unmodified copy)
 - `p7/dspark_retention/src/vllm/v1/attention/backends/mla/sparse_swa.py`
   (unmodified copy)
+- `p7/native_context_memory/overlay/vllm/v1/attention/backends/mla/indexer.py`
+  (modified)
+- `p7/native_context_memory/overlay/vllm/model_executor/layers/quantization/utils/mxfp8_utils.py`
+  (modified)
+- `p7/native_context_memory/src/vllm/v1/attention/backends/mla/indexer.py`
+  (unmodified copy)
+- `p7/native_context_memory/src/vllm/model_executor/layers/quantization/utils/mxfp8_utils.py`
+  (unmodified copy)
 
-The five modified files carry QMesh modification notices. The two unmodified
+The seven modified files carry QMesh modification notices. The four unmodified
 extracts carry their upstream headers and are pinned by SHA-256 in
-`p7/dspark_retention/manifest.txt` and `package.sh`. The full upstream NOTICE
+`p7/dspark_retention/manifest.txt` and `package.sh` (retention) and
+`p7/native_context_memory/manifest.txt` and `package.sh` (native context
+memory). The full upstream NOTICE
 is retained in `third_party/vllm/NOTICE`; the Apache-2.0 text is
 `third_party/vllm/LICENSE`. Those files remain Apache-2.0 and are not
 relicensed by the root MIT text. The full vLLM and vLLM-Moet source trees, the

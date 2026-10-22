@@ -42,8 +42,9 @@ comparison conditions. Pair medians, `1024p_128c / 128p_1024c` tok/s: k0
 **57.37 / 57.43**, k1 **72.69 / 75.32**, k3 **82.13 / 96.70**, k5 early
 **78.49 / 102.82**. Best retained per-layer k5 is **76.10 / 97.38** under the
 paired conditions; RG6 is **76.31 / 98.81** with no paired gain (95% CI crosses
-zero) and is rejected. **120 tok/s is not reached**: no aggregate median reaches
-it, and only **4 of 64** early-k5 timed requests do (1 short, 3 long). The
+zero) and is rejected. **120 tok/s is not reached**: no per-request or
+aggregate-pair median reaches it, and only **4 of 64** early-k5 timed requests
+do (1 short, 3 long). The
 drafter is **loaded** (`DSpark draft model loaded: 97 params`; **88.93 GiB**
 model weights including
 the 7.388 GiB drafter). Retention is **CPU-proven plus runtime-functional**, not
@@ -655,7 +656,7 @@ per configuration) and **144 quality rows**. Forced budgets (`ignore_eos`,
 for quality. TTFT includes request, template and network overhead and is not
 pure prefill; decode is the streaming decode-window rate from SSE
 `usage.completion_tokens`, never chunk count. The **120 tok/s goal was not
-reached**, and no aggregate 120 tok/s claim is made.
+reached**, and no per-request 120 tok/s claim is made.
 
 **Deployment.** The drafter is loaded: `DSpark draft model loaded: 97 params`,
 boot `Model loading took 88.92 GiB`, **88.93 GiB** weights including the
@@ -860,7 +861,7 @@ boundary; no full suffix bitwise proof was recorded**.
 **Guards.** Use exact capture sizes only; padded SM120 sparse-MLA rows are a
 known hang. Keep `AFD_LAYERS=40` and `AFD_NUM_EXPERTS=384`; never route draft
 layers 40-42 to GX. Do not touch the transport. Do not adopt RG6 or k7, and do
-not quote an aggregate 120 tok/s or quality/lossless result.
+not quote a per-request 120 tok/s or quality/lossless result.
 
 **Repro.** Canonical k5 per-layer launch:
 
@@ -896,6 +897,153 @@ Harness SHA256 `7ffd626c9c2fa168f1369e40a225575ebf24742e79c185a996e0a95b286a1806
 fixtures SHA256 `2433c0eb06cf766301979895ab6599f580162518bb18a834982710cee377179c`
 (earlier k0/k3 fixtures `b06dc480...`). Raw rounds:
 the eval results directory. Full per-type/quality tables: the DSpark final-results artifact.
+
+### W9. Concurrency and 2 GiB KV-capacity campaign (2026-10-22; complete)
+
+**Validity.** All **64/64 groups, 240/240 measured requests and 32/32 warmup
+requests** validated; `invalid_requests=0`, `validation.all_groups_valid=true`
+and the run exited zero under `--strict --require-engine-events`. The run saw
+272 event lines with zero bad lines and joined 240/240 rows by unique request
+suffix (zero base mismatches, token-count mismatches or non-monotone
+timestamps). Every row's request-scoped timestamps are monotone
+`queued_ts ≤ scheduled_ts ≤ first_token_ts ≤ last_token_ts ≤ finished_ts`, and
+`num_cached_tokens` was zero (prefix caching off).
+
+**Matrix and recipe.** Prefill is **2048 prompt / 1 completion**; decode is
+**512 prompt / 2048 completion**. Context types are code, prose, JSON and
+tool-agent; C is 1/2/4/8; two measured repeats per cell plus one warmup per
+execution configuration. The verified launch was k5 (`SPEC_TOKENS=5`),
+captures `1,5,6,12,24,48` (max 48, `FULL_DECODE_ONLY`), prefix caching off,
+`MAX_MODEL_LEN=1048576`, `MAX_NUM_SEQS=8`,
+`MAX_NUM_BATCHED_TOKENS=2048`, `KV_CACHE_BYTES=2147483648`,
+`NATIVE_CTX_MEM=1` (pinned in-place MXFP8 and native-context overlays verified
+from `/proc`), `DSPARK_EXTRA_GIB=1`,
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=64`, `GPU_MEM_UTIL=0.97`, and a request
+event file under the shared `/tmp/afd_dump`.
+
+**Metric definitions.**
+
+- Engine prefill per request: `num_prompt_tokens / (first_token_ts -
+  scheduled_ts)`. It includes the first generated token and scheduler
+  interleaving; queue wait is measured separately as `scheduled_ts - queued_ts`
+  and is not inside this interval. It is not GPU kernel time.
+- Stream decode per request: `(usage.completion_tokens -
+  len(first_chunk_token_ids)) / (last_token_arrival - first_token_arrival)`.
+  The whole first multi-token emission is removed. This is the assigned stream
+  rate, not the engine's `(num_generation_tokens - 1) / decode_time_s` interval
+  rate.
+- Group prefill: `sum(prompt_tokens) / (max(first_token_ts) - gate_release)`;
+  group decode: `sum(decode_tokens_after_first) / (max(last_token_ts) -
+  min(first_token_ts))`. Both use actual row timestamps, not summed per-request
+  times.
+- Median and peak are over valid requests; peak is the single fastest request,
+  never a sustained rate. Group cells are medians over the eight valid groups
+  at that shape×C (four types × two repeats).
+
+**Per-type request results** (tok/s; n is measured requests in the cell):
+
+| type | C | n | prefill med | prefill peak | decode med | decode peak |
+|---|---:|---:|---:|---:|---:|---:|
+| code | 1 | 2 | 2,651.6 | 2,652.1 | 95.8 | 99.7 |
+| code | 2 | 4 | 1,815.3 | 2,089.4 | 73.9 | 75.2 |
+| code | 4 | 8 | 1,438.1 | 2,088.6 | 42.1 | 43.1 |
+| code | 8 | 16 | 1,335.7 | 2,089.1 | 28.4 | 32.0 |
+| prose | 1 | 2 | 2,673.2 | 2,676.6 | 88.9 | 95.0 |
+| prose | 2 | 4 | 1,828.1 | 2,103.7 | 65.6 | 74.6 |
+| prose | 4 | 8 | 1,448.7 | 2,100.9 | 32.7 | 39.8 |
+| prose | 8 | 16 | 1,342.9 | 2,099.0 | 23.7 | 28.9 |
+| json | 1 | 2 | 2,651.8 | 2,652.8 | 78.7 | 81.4 |
+| json | 2 | 4 | 1,818.8 | 2,096.5 | 49.7 | 57.5 |
+| json | 4 | 8 | 1,438.9 | 2,101.2 | 30.5 | 34.3 |
+| json | 8 | 16 | 1,336.3 | 2,098.6 | 20.8 | 25.3 |
+| toolagent | 1 | 2 | 2,615.7 | 2,615.8 | 119.4 | 135.0 |
+| toolagent | 2 | 4 | 1,786.0 | 2,055.7 | 69.3 | 74.0 |
+| toolagent | 4 | 8 | 1,418.3 | 2,059.7 | 44.0 | 45.9 |
+| toolagent | 8 | 16 | 1,314.7 | 2,058.4 | 31.1 | 31.9 |
+
+**Overall group rates.**
+
+| shape | C | groups | group rate med | group peak | group wall med (s) | engine overlap |
+|---|---:|---:|---:|---:|---:|---:|
+| prefill | 1 | 8 | 2,633.4 | 2,657.7 | 0.781 | 1 |
+| prefill | 2 | 8 | 2,650.8 | 2,670.6 | 1.548 | 2 |
+| prefill | 4 | 8 | 2,659.0 | 2,675.9 | 3.084 | 2 |
+| prefill | 8 | 8 | 2,664.6 | 2,679.3 | 6.152 | 2 |
+| decode | 1 | 8 | 93.5 | 135.0 | 22.328 | 1 |
+| decode | 2 | 8 | 124.5 | 148.3 | 33.623 | 2 |
+| decode | 4 | 8 | 133.0 | 181.0 | 63.202 | 4 |
+| decode | 8 | 8 | 178.0 | 233.1 | 93.107 | 8 |
+
+`engine overlap` is the maximum request-scoped `[scheduled_ts,
+last_token_ts]` overlap in a group.
+
+**Scaling and residency.** Offered concurrency rose 8×. Group prefill was flat
+from **2,633.4 tok/s at C1 to 2,664.6 at C8 (+1.2%)**; group decode rose
+**1.90×** from **93.5 to 178.0 tok/s**, far short of 8×. Per-request medians
+fell from **2,651.6 to 1,336.4 tok/s** (prefill; includes the first token and
+interleaving) and from **93.5 to 25.0 tok/s** (decode). Group wall rose from
+**0.781 to 6.152 s** (prefill) and **22.328 to 93.107 s** (decode). C1 is the
+latency-optimal point.
+
+The **120 tok/s target is a single-stream, per-request target**, not a
+multi-request throughput target. The 178.0 tok/s C8 value is a group aggregate
+across eight concurrent requests, not a per-request result;
+the overall per-request decode median is 93.5 at C1 and 25.0 at C8, and the
+best per-type C1 median is 119.4 (tool-agent). This campaign does not
+establish a 120 tok/s single-request result.
+
+Decode concurrency is proven by engine events: `[scheduled_ts,
+last_token_ts]` overlap is exactly **1/2/4/8** at C1/2/4/8 for every context
+type and both repeats, and all C requests produce tokens. Prefill cannot be
+parallel at this prompt size: one 2048-token prompt consumes the entire
+`MAX_NUM_BATCHED_TOKENS=2048` budget, so scheduled-to-last overlap peaks at
+**2** at C2/4/8. Resident `[queued_ts, finished_ts]` overlap is **1/2/4/8**
+with median queue wait **0 / 0 / 385 / 1,920 ms**. The C8 prefill group is a
+queued control, and its 2,664.6 tok/s is queue-plus-compute throughput.
+
+`/metrics` group-summary gauges are sampled after completion and can read zero.
+An independent 250 ms watcher over the last 20 groups recorded decode running
+**1/2/4/8**, decode waiting **0/0/0/3**, and C8 prefill running **1** /
+waiting **6**. The build's `vllm:gpu_cache_usage_perc` reported 0.0 throughout
+and is unusable. Engine event intervals are the primary residency evidence,
+not the gauges.
+
+**KV capacity and GPU memory.** The 2 GiB pool reported **18,320 blocks ×
+117,216 B = 2,147,397,120 B** (86,528 B spare), block size 128,
+`nvfp4_ds_mla`, **`kv_cache_size_tokens=2,073,385`**, and **1.9773×** maximum
+native concurrency at the configured `MAX_MODEL_LEN=1048576`. C8 block demand
+is **8,712** for prefill and **8,744** for decode of 18,320, so the tested
+shapes fit by block arithmetic.
+
+`nvidia-smi` GPU0 sampling measured **1,222 MiB** minimum free during boot,
+**1,656 MiB** in a post-boot idle snapshot, and **572 MiB** for all **7,612**
+campaign samples (19:57:16–20:34:38Z); used held at **96,678 MiB** from before
+warmups through the last C8 group. C8 added no measurable allocation above the
+boot/load watermark, there was no OOM, `preemptions_total=0`, and post-campaign
+idle was 96,678 MiB used / 572 MiB free. At that floor, a 512 MiB reserve
+allows only **+60 MiB** of cache (**2.059 GiB**, +537 blocks / +68,703
+tokens); a 1 GiB reserve leaves no room. A 3 GiB attempt did not complete a
+real prefill even after the indexer-bound and temporary-allocation fixes; it
+OOM'd in the MXFP8 upcast. **3 GiB is not claimed fit.**
+
+`MAX_MODEL_LEN=1,048,576` is a configured limit, not a tested context: the
+largest prompt tested is **2048 tokens**, the largest per-request total **2560**,
+and the largest C8 prefill group **8×2048 prompt tokens**. The 2,073,385-token,
+1.9773× and +60 MiB figures are capacity/admission arithmetic; they are not a
+measured 1M-token request and do not guarantee an unseen long-context workload.
+The largest verified request is 2560 tokens total.
+
+**Artifacts and reproduction.** Authoritative run: `campaign2/` under the
+concurrency results directory, run id `cwb-20261022T195826Z-dbc7fe`, 2,143.93 s
+wall, `summary.json` SHA256
+`58bac586beacf1ea963312c4cf3134876b01a6dfe74d7603ce103094a019b26b`. Its
+`rows.jsonl` (240 rows), `groups.jsonl` (64 groups), `engine_events_snapshot.jsonl`
+(442 lines; 272 for this run), `offline_report.txt` and
+`offline_overlap.json` are the sources. The table medians were recomputed from
+valid rows/groups and match the shape-specific summary block; the mixed-shape
+`by_type_concurrency` and `summary.md` tables are not used. No API rerun and no
+post-hoc row filtering were used. Launch recipe and harness command are in the
+README Run and Reproduce sections.
 
 ## 5. Gates and order
 

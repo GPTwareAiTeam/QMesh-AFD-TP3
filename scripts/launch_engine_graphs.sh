@@ -26,12 +26,31 @@
 #   DSPARK_DRAFTER_GIB=G   DSpark drafter footprint (default 7.388)
 #   DSPARK_MEM_ACK=1       required to accept GPU_MEM_UTIL>0.97
 #   GPU_TOTAL_MIB=N        override GPU0 memory.total (default: nvidia-smi -i 0)
+#   MAX_MODEL_LEN=N        model context/admission cap (default 8192). The
+#                          model's native max is 1048576; this is an admission
+#                          cap, not a proven 1M-prompt run.
+#   MAX_NUM_SEQS=N         max resident sequences (default 1). >1 is explicit
+#                          opt-in and derives exact target capture widths for
+#                          C=1,2,4,8 (other C falls back to eager).
+#   MAX_NUM_BATCHED_TOKENS=N  scheduler prefill token budget (default 4096).
+#   KV_CACHE_GIB=G         explicit KV reservation, positive integer GiB.
+#   KV_CACHE_BYTES=B       explicit KV reservation, positive integer bytes.
+#                          GIB/BYTES are one setting; conflicting values fail.
+#                          Passed as --kv-cache-memory-bytes; vLLM then skips
+#                          KV profiling and reserves exactly B. The startup
+#                          free-memory gate still applies; CUDA-graph memory is
+#                          not subtracted by that gate. No implicit KV size.
+#   DSPARK_ENGINE_EVENT_FILE=P  opt-in engine event JSONL; must be under
+#                          /tmp/afd_dump (the host/container shared mount).
 #   CAPTURE_SIZES=a,b,...  decode capture sizes. Default by SPEC: 0 -> 1,
-#                          1 -> 1,2, 3 -> 1,3,4, 5 -> 1,5,6, 7 -> 1,7,8. Any
-#                          explicit list must contain 1 and, for SPEC>0, SPEC
-#                          and SPEC+1.
+#                          1 -> 1,2, 3 -> 1,3,4, 5 -> 1,5,6, 7 -> 1,7,8.
+#                          With MAX_NUM_SEQS>1 the default adds the exact
+#                          target verify widths for C=1,2,4,8 (k=5, C=8 ->
+#                          1,5,6,12,24,48; no padded target rows). Any explicit
+#                          list must contain 1, SPEC, SPEC+1 and those widths.
 #   MAX_CAPTURE=N          scalar --max-cudagraph-capture-size; defaults to the
-#                          largest CAPTURE_SIZES entry and must be >= it
+#                          largest CAPTURE_SIZES entry and must equal it (vLLM
+#                          rejects a scalar that differs from the filtered list max)
 #   EAGER=1                explicit experiment: --enforce-eager, no CUDA graphs
 #   AFD_TRANSPORT=0        DIAGNOSTIC ONLY: P7-only floor, no seam, no wire,
 #                          edges untouched (cannot serve real requests)
@@ -44,6 +63,11 @@
 #                          of p7/mhc_quant (A/B; default mounts the fused quant)
 #   DSPARK_RETENTION_DIR=D package root (default p7/dspark_retention); only
 #                          mounted when SPEC_TOKENS>0
+#   NATIVE_CTX_MEM=1       mount p7/native_context_memory's exact-bound indexer
+#                          and in-place MXFP8 dequant overlays (hash-pinned;
+#                          default 0 leaves the image files untouched). The
+#                          measured native-1M / 3 GiB KV / C=8 recipe also needs
+#                          MAX_NUM_BATCHED_TOKENS=2048 for JIT-warmup headroom.
 #   DRY_RUN=1              validate everything and print the env/argv without
 #                          restarting edges or starting a container
 #   NAME=... PORT=... CACHE_DIR=... EXTRA_DOCKER_ARGS=...
@@ -218,9 +242,17 @@ DSPARK_BASELINE_GIB=${DSPARK_BASELINE_GIB:-82.16}
 DSPARK_DRAFTER_GIB=${DSPARK_DRAFTER_GIB:-7.388}
 DSPARK_EXTRA_GIB=${DSPARK_EXTRA_GIB:-}
 DSPARK_RETENTION_DIR=${DSPARK_RETENTION_DIR:-$EXP/p7/dspark_retention}
+NATIVE_CTX_MEM=${NATIVE_CTX_MEM:-0}
+NATIVE_CTX_MEM_DIR=${NATIVE_CTX_MEM_DIR:-$EXP/p7/native_context_memory}
 CAPTURE_SIZES=${CAPTURE_SIZES:-}
 MAX_CAPTURE=${MAX_CAPTURE:-}
 DRY_RUN=${DRY_RUN:-0}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-1}
+MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-4096}
+KV_CACHE_GIB=${KV_CACHE_GIB:-}
+KV_CACHE_BYTES=${KV_CACHE_BYTES:-}
+DSPARK_ENGINE_EVENT_FILE=${DSPARK_ENGINE_EVENT_FILE:-}
 
 
 EAGER=${EAGER:-0}
@@ -234,12 +266,53 @@ case "$AFD_TRANSPORT" in
 esac
 case "$AFD_SEAM" in 0|1) ;; *) die "AFD_SEAM must be 0 or 1, got '$AFD_SEAM'";; esac
 case "$DRY_RUN" in 0|1) ;; *) die "DRY_RUN must be 0 or 1, got '$DRY_RUN'";; esac
+case "$NATIVE_CTX_MEM" in 0|1) ;; *) die "NATIVE_CTX_MEM must be 0 or 1, got '$NATIVE_CTX_MEM'";; esac
 case "$SPEC_TOKENS" in
   0|1|2|3|4|5|7) ;;
   *) die "SPEC_TOKENS must be 0..5 or 7 (validated: 0/1/3/5), got '$SPEC_TOKENS'" ;;
 esac
 if [[ "$SPEC_TOKENS" == 2 || "$SPEC_TOKENS" == 4 ]]; then
   echo "launch: SPEC_TOKENS=$SPEC_TOKENS is measurable but not a validated point; explicit CAPTURE_SIZES is required" >&2
+fi
+_is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+_is_pos_int "$MAX_MODEL_LEN" ||
+  die "MAX_MODEL_LEN must be a positive integer, got '$MAX_MODEL_LEN'"
+(( MAX_MODEL_LEN <= 1048576 )) ||
+  die "MAX_MODEL_LEN=$MAX_MODEL_LEN exceeds native max_position_embeddings 1048576 (admission cap; no 1M prompt is implied)"
+_is_pos_int "$MAX_NUM_SEQS" ||
+  die "MAX_NUM_SEQS must be a positive integer, got '$MAX_NUM_SEQS'"
+_is_pos_int "$MAX_NUM_BATCHED_TOKENS" ||
+  die "MAX_NUM_BATCHED_TOKENS must be a positive integer, got '$MAX_NUM_BATCHED_TOKENS'"
+(( MAX_NUM_BATCHED_TOKENS >= MAX_NUM_SEQS )) ||
+  die "MAX_NUM_BATCHED_TOKENS=$MAX_NUM_BATCHED_TOKENS must be >= MAX_NUM_SEQS=$MAX_NUM_SEQS"
+(( MAX_NUM_BATCHED_TOKENS <= MAX_NUM_SEQS * MAX_MODEL_LEN )) ||
+  die "MAX_NUM_BATCHED_TOKENS=$MAX_NUM_BATCHED_TOKENS exceeds MAX_NUM_SEQS*MAX_MODEL_LEN=$((MAX_NUM_SEQS * MAX_MODEL_LEN))"
+
+_kv_from_gib=""
+if [[ -n "$KV_CACHE_GIB" ]]; then
+  _is_pos_int "$KV_CACHE_GIB" ||
+    die "KV_CACHE_GIB must be a positive integer, got '$KV_CACHE_GIB'"
+  (( KV_CACHE_GIB <= 1024 )) ||
+    die "KV_CACHE_GIB=$KV_CACHE_GIB is implausibly large for one GPU"
+  _kv_from_gib=$((KV_CACHE_GIB * 1073741824))
+fi
+if [[ -n "$KV_CACHE_BYTES" ]]; then
+  _is_pos_int "$KV_CACHE_BYTES" ||
+    die "KV_CACHE_BYTES must be a positive integer, got '$KV_CACHE_BYTES'"
+  if [[ -n "$_kv_from_gib" && "$KV_CACHE_BYTES" != "$_kv_from_gib" ]]; then
+    die "KV_CACHE_GIB=$KV_CACHE_GIB ($_kv_from_gib bytes) disagrees with KV_CACHE_BYTES=$KV_CACHE_BYTES"
+  fi
+  _kv_from_gib=$KV_CACHE_BYTES
+fi
+KV_CACHE_BYTES=$_kv_from_gib
+if [[ -n "$KV_CACHE_BYTES" ]]; then
+  _kv_gib=$(awk -v b="$KV_CACHE_BYTES" 'BEGIN { printf "%.3f", b / 1073741824 }')
+  echo "launch: explicit KV cache bytes=$KV_CACHE_BYTES (${_kv_gib} GiB); vLLM skips KV profiling and reserves exactly this; the startup free-memory gate still applies and CUDA-graph memory is not subtracted" >&2
+fi
+if [[ -n "$DSPARK_ENGINE_EVENT_FILE" ]]; then
+  [[ "$DSPARK_ENGINE_EVENT_FILE" == /tmp/afd_dump/* ]] ||
+    die "DSPARK_ENGINE_EVENT_FILE must be under /tmp/afd_dump (host/container shared mount), got '$DSPARK_ENGINE_EVENT_FILE'"
+  echo "launch: opt-in engine event file $DSPARK_ENGINE_EVENT_FILE" >&2
 fi
 
 if [[ "$EAGER" == 1 ]]; then
@@ -252,14 +325,35 @@ else
   # DSpark needs one graph at the draft width (SPEC_TOKENS rows) and one at the
   # target verify width (SPEC_TOKENS+1 rows); every decode graph needs row 1.
   if [[ -z "$CAPTURE_SIZES" ]]; then
-    case "$SPEC_TOKENS" in
-      0) CAPTURE_SIZES=1 ;;
-      1) CAPTURE_SIZES=1,2 ;;
-      3) CAPTURE_SIZES=1,3,4 ;;
-      5) CAPTURE_SIZES=1,5,6 ;;
-      7) CAPTURE_SIZES=1,7,8 ;;
-      *) die "SPEC_TOKENS=$SPEC_TOKENS has no validated capture default; set CAPTURE_SIZES explicitly (must contain 1, $SPEC_TOKENS and $((SPEC_TOKENS+1)))" ;;
-    esac
+    if (( MAX_NUM_SEQS > 1 )); then
+      # Exact target verify widths for the measured concurrency points 1,2,4,8.
+      # Target graphs round a smaller width up to decode_query_len=SPEC+1, so
+      # these widths are the ones that avoid padded sparse-MLA target rows.
+      _want=(1)
+      if (( SPEC_TOKENS > 0 )); then
+        _want+=("$SPEC_TOKENS" "$((SPEC_TOKENS + 1))")
+      fi
+      _c=1
+      while (( _c <= MAX_NUM_SEQS )); do
+        if (( SPEC_TOKENS > 0 )); then
+          _want+=("$((_c * (SPEC_TOKENS + 1)))")
+        else
+          _want+=("$_c")
+        fi
+        (( _c *= 2 ))
+      done
+      CAPTURE_SIZES=$(printf '%s\n' "${_want[@]}" | sort -n -u | paste -sd, -)
+      echo "launch: derived exact capture sizes [$CAPTURE_SIZES] for MAX_NUM_SEQS=$MAX_NUM_SEQS (target widths for C=1,2,4,8; other C falls back to eager)" >&2
+    else
+      case "$SPEC_TOKENS" in
+        0) CAPTURE_SIZES=1 ;;
+        1) CAPTURE_SIZES=1,2 ;;
+        3) CAPTURE_SIZES=1,3,4 ;;
+        5) CAPTURE_SIZES=1,5,6 ;;
+        7) CAPTURE_SIZES=1,7,8 ;;
+        *) die "SPEC_TOKENS=$SPEC_TOKENS has no validated capture default; set CAPTURE_SIZES explicitly (must contain 1, $SPEC_TOKENS and $((SPEC_TOKENS+1)))" ;;
+      esac
+    fi
   fi
   IFS=',' read -r -a _raw_sizes <<< "$CAPTURE_SIZES"
   _sizes=()
@@ -286,13 +380,26 @@ else
     _has_size "$((SPEC_TOKENS + 1))" ||
       die "CAPTURE_SIZES must include the verify width $((SPEC_TOKENS + 1)), got '$CAPTURE_SIZES'"
   fi
+  _c=1
+  while (( _c <= MAX_NUM_SEQS )); do
+    if [[ "$SPEC_TOKENS" == 0 ]]; then
+      _width=$_c
+    else
+      _width=$((_c * (SPEC_TOKENS + 1)))
+    fi
+    _has_size "$_width" ||
+      die "CAPTURE_SIZES must include the exact target width $_width for concurrency $_c (MAX_NUM_SEQS=$MAX_NUM_SEQS), got '$CAPTURE_SIZES'"
+    (( _c *= 2 ))
+  done
+  (( MAX_NUM_BATCHED_TOKENS >= _largest )) ||
+    die "MAX_NUM_BATCHED_TOKENS=$MAX_NUM_BATCHED_TOKENS is smaller than the largest emitted capture size $_largest; vLLM filters captures above max_num_batched_tokens and then rejects a max_cudagraph_capture_size that differs from the filtered list max"
   if [[ -z "$MAX_CAPTURE" ]]; then
     MAX_CAPTURE=$_largest
   else
     [[ "$MAX_CAPTURE" =~ ^[1-9][0-9]*$ ]] ||
       die "MAX_CAPTURE must be a positive integer, got '$MAX_CAPTURE'"
-    (( MAX_CAPTURE >= _largest )) ||
-      die "MAX_CAPTURE=$MAX_CAPTURE is smaller than the largest capture size ($_largest)"
+    (( MAX_CAPTURE == _largest )) ||
+      die "MAX_CAPTURE=$MAX_CAPTURE must equal the largest capture size ($_largest); vLLM rejects a scalar that differs from the filtered list max"
   fi
   CG_ARGS="--compilation-config {\"cudagraph_mode\":\"FULL_DECODE_ONLY\",\"cudagraph_capture_sizes\":[${_normalized}]} --max-cudagraph-capture-size ${MAX_CAPTURE}"
 fi
@@ -333,6 +440,23 @@ else
         exit !(budget + 1e-9 >= need)
       }' ||
     die "GPU_MEM_UTIL=$GPU_MEM_UTIL does not cover baseline $DSPARK_BASELINE_GIB + drafter $DSPARK_DRAFTER_GIB + extra $DSPARK_EXTRA_GIB GiB"
+  if [[ -n "$KV_CACHE_BYTES" ]]; then
+    # The explicit reservation replaces vLLM's profiled KV, so this is a
+    # conservative extra-headroom read, not a second hard gate: the measured
+    # baseline may already include a smaller profiled KV. Never trade the
+    # requested KV/context down here; the allocator and startup gate decide.
+    awk -v u="$GPU_MEM_UTIL" -v t="$GPU_TOTAL_MIB" \
+        -v b="$DSPARK_BASELINE_GIB" -v d="$DSPARK_DRAFTER_GIB" \
+        -v e="$DSPARK_EXTRA_GIB" -v kv="$KV_CACHE_BYTES" 'BEGIN {
+          budget = t / 1024.0 * u
+          kv_gib = kv / 1073741824.0
+          total = b + d + e + kv_gib
+          printf "launch: explicit KV %.3f GiB: estimate %.3f GiB vs budget %.3f GiB, headroom %.3f GiB\n",
+                 kv_gib, total, budget, budget - total > "/dev/stderr"
+          if (total > budget + 1e-9)
+            printf "launch: WARNING explicit KV estimate exceeds the util budget (conservative; baseline may include profiled KV); the launcher does not lower KV or cap context, actual allocator/startup failure is authoritative\n" > "/dev/stderr"
+        }'
+  fi
   if awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0.97) }'; then
     [[ "${DSPARK_MEM_ACK:-0}" == 1 ]] ||
       die "GPU_MEM_UTIL=$GPU_MEM_UTIL (>0.97) needs DSPARK_MEM_ACK=1 after a measured headroom run"
@@ -448,6 +572,12 @@ DOCKER_EXTRA=(
   --device /dev/infiniband
 )
 
+# Opt-in only: no default event file, so the hook stays off in prod. The host
+# directory backing it is already bind-mounted at /tmp/afd_dump above.
+if [[ -n "$DSPARK_ENGINE_EVENT_FILE" ]]; then
+  DOCKER_EXTRA+=(-e DSPARK_ENGINE_EVENT_FILE="$DSPARK_ENGINE_EVENT_FILE")
+fi
+
 # sm_120 mHC fused MXFP8 quant: the attention boundary's mHC kernel writes the
 # projection's MXFP8 payload/scales (p7/mhc_quant/). The kernel dir and the three
 # files generated by p7/mhc_quant/patch_vllm_mhc_quant_sm120.py are mounted over
@@ -542,6 +672,103 @@ else
   echo "launch: DSpark off (SPEC_TOKENS=0); retention overlay not mounted" >&2
 fi
 
+# Native 1M context-memory overlay (opt-in, default off). Two single-file
+# overrides: the sparse indexer's prefill K workspace uses the exact per-chunk
+# bound (factor * max_model_len rows) instead of the 8.7x flashmla_sparse
+# envelope (saving 0.93 GiB at max_model_len=1M with the MXFP4 indexer cache),
+# and MXFP8 dequant reuses its float32 weight copy instead of allocating a
+# second 128 MiB temporary for wo_a. Both are packaged from this exact image by
+# p7/native_context_memory/package.sh; never mount a /tmp copy. With the flag
+# off, nothing is mounted and the image files are untouched.
+NATIVE_CTX_IMAGE_ID=sha256:9a21de6e8ba7ade4df4590841401edd09c406638ad21bb22d6f170c297d0f404
+NATIVE_CTX_BUILD_COMMIT=49cb2bbf71cfd36ee5aa33d1e184b1cddff55294
+if [[ "$NATIVE_CTX_MEM" == 1 ]]; then
+  # Container root of the vLLM package. Every `_ctx_rel` already starts with
+  # `vllm/`, so this must NOT include `vllm` itself: the engine imports
+  # `/usr/local/lib/python3.12/dist-packages/vllm/...`, and a doubled
+  # `vllm/vllm` path mounts a file nothing imports (silent no-op).
+  _vllm=/usr/local/lib/python3.12/dist-packages
+  _ctx_rels=(
+    vllm/v1/attention/backends/mla/indexer.py
+    vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+  )
+  _ctx_src_shas=(
+    3150214befd174998b02cd2fc254a9b03966b20f4da2372af0c5fc5a956d61fe
+    03a16184c905b3a5f0f4aa52736cefeb0528d97fa3d79a85da08d10b68b86c09
+  )
+  _ctx_overlay_shas=(
+    6c4185759db3172a6cd1dc625b8e7cca083d49ccbd9ea07991f14cfda8305ed6
+    d70568eeb878bfc0b2f3ce1b49ce4f76a5520711d2cf54218adbd68481c744e9
+  )
+  _ctx_overlays=()
+  [[ -f "$NATIVE_CTX_MEM_DIR/package.sh" ]] ||
+    die "native-context-memory package missing at $NATIVE_CTX_MEM_DIR (run bash $NATIVE_CTX_MEM_DIR/package.sh or set NATIVE_CTX_MEM_DIR)"
+  _image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null) ||
+    die "IMAGE=$IMAGE not found; the native-context-memory overlay is pinned to $NATIVE_CTX_IMAGE_ID"
+  [[ "$_image_id" == "$NATIVE_CTX_IMAGE_ID" ]] ||
+    die "native-context-memory overlay is pinned to $NATIVE_CTX_IMAGE_ID ($NATIVE_CTX_BUILD_COMMIT), got $_image_id"
+  _commit=$(docker image inspect --format '{{index .Config.Labels "ai.vllm.build.commit"}}' "$IMAGE" 2>/dev/null) ||
+    _commit=""
+  [[ "$_commit" == "$NATIVE_CTX_BUILD_COMMIT" ]] ||
+    die "image build commit mismatch: '$_commit' != '$NATIVE_CTX_BUILD_COMMIT'"
+  for _i in "${!_ctx_rels[@]}"; do
+    _ctx_rel=${_ctx_rels[$_i]}
+    _ctx_src_sha=${_ctx_src_shas[$_i]}
+    _ctx_overlay_sha=${_ctx_overlay_shas[$_i]}
+    _ctx_dest="$_vllm/$_ctx_rel"
+    for _kind in src overlay; do
+      _file="$NATIVE_CTX_MEM_DIR/$_kind/$_ctx_rel"
+      [[ -f "$_file" ]] ||
+        die "native-context-memory $_kind file missing: $_file (regenerate with p7/native_context_memory/package.sh)"
+    done
+    _got=$(sha256sum "$NATIVE_CTX_MEM_DIR/src/$_ctx_rel")
+    _got=${_got%% *}
+    [[ "$_got" == "$_ctx_src_sha" ]] ||
+      die "native-context-memory source hash mismatch for $_ctx_rel: $_got != $_ctx_src_sha"
+    _got=$(sha256sum "$NATIVE_CTX_MEM_DIR/overlay/$_ctx_rel")
+    _got=${_got%% *}
+    [[ "$_got" == "$_ctx_overlay_sha" ]] ||
+      die "native-context-memory overlay hash mismatch for $_ctx_rel: $_got != $_ctx_overlay_sha"
+    # Preflight the exact path that will be shadowed, inside the image, with no
+    # GPU and no engine start: `cat` (CPU-only, ephemeral) must return the pinned
+    # source bytes. This proves each mount destination is a real, imported file
+    # before the warmup/JIT phase can depend on it, and it fails loudly instead
+    # of mounting into a path that does not exist in this image.
+    _got=$(docker run --rm --runtime runc --network none --entrypoint cat \
+      "$IMAGE" "$_ctx_dest" 2>/dev/null | sha256sum) || true
+    _got=${_got%% *}
+    [[ "$_got" == "$_ctx_src_sha" ]] ||
+      die "image file $_ctx_dest is missing or not the pinned image source ($_got != $_ctx_src_sha); the native-context-memory overlay would not be imported"
+    DOCKER_EXTRA+=(-v "$NATIVE_CTX_MEM_DIR/overlay/$_ctx_rel:$_ctx_dest:ro")
+    _ctx_overlays+=("$NATIVE_CTX_MEM_DIR/overlay/$_ctx_rel")
+    echo "launch: native-context-memory mount $NATIVE_CTX_MEM_DIR/overlay/$_ctx_rel -> $_ctx_dest" >&2
+  done
+  # Each image invalidates its .pyc by source mtime, and Python then recompiles
+  # the single-file mounts at import; compile both up front.
+  if ! python3 - "${_ctx_overlays[@]}" <<'PY'
+import sys
+
+for path in sys.argv[1:]:
+    with open(path) as f:
+        compile(f.read(), path, "exec")
+PY
+  then
+    die "native-context-memory overlay does not compile"
+  fi
+  # Echo the resulting rows so the boot log proves which bound was used (factor
+  # mirrors vllm.config.vllm: 5 at <=256Ki tokens, else 2).
+  _ctx_factor=2
+  (( MAX_MODEL_LEN <= 262144 )) && _ctx_factor=5
+  _ctx_rows=$((_ctx_factor * MAX_MODEL_LEN))
+  _ctx_k_mib=$((_ctx_rows * 68 / 1048576))
+  echo "launch: native-context-memory overlay on (factor=$_ctx_factor, max_prefill_rows=$_ctx_rows, indexer K <= ${_ctx_k_mib} MiB at ratio 1, package=$NATIVE_CTX_MEM_DIR)" >&2
+  if (( MAX_MODEL_LEN >= 524288 && MAX_NUM_BATCHED_TOKENS > 2048 )); then
+    echo "launch: native-context-memory note: the measured native-1M / 3 GiB KV / C=8 recipe uses MAX_NUM_BATCHED_TOKENS=2048; $MAX_NUM_BATCHED_TOKENS leaves less JIT-warmup headroom" >&2
+  fi
+else
+  echo "launch: native-context-memory overlay off (NATIVE_CTX_MEM=0)" >&2
+fi
+
 # Status logging is opt-in: the seam already understands AFD_SEAM_STATUS_LOG;
 # only the host directory that backs it is a launch concern. Do not create or
 # mount anything when the caller has not supplied an existing directory.
@@ -555,8 +782,8 @@ fi
 RUN_ENV=(
   MODEL_DIR="$MODEL_DIR" IMAGE="$IMAGE" NAME="$NAME" GPUS=0 TP=1 PORT="$PORT"
   SPEC_TOKENS="$SPEC_TOKENS" LANGUAGE_ONLY=1 GPU_MEM_UTIL="$GPU_MEM_UTIL"
-  MAX_MODEL_LEN=8192 MAX_NUM_SEQS=1 MAX_NUM_BATCHED_TOKENS=4096
-  CACHE_DIR="$CACHE_DIR" EXTRA_ARGS="$CG_ARGS --no-enable-prefix-caching"
+  MAX_MODEL_LEN="$MAX_MODEL_LEN" MAX_NUM_SEQS="$MAX_NUM_SEQS" MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS"
+  CACHE_DIR="$CACHE_DIR" EXTRA_ARGS="$CG_ARGS --no-enable-prefix-caching${KV_CACHE_BYTES:+ --kv-cache-memory-bytes $KV_CACHE_BYTES}"
   EXTRA_DOCKER_ARGS="${DOCKER_EXTRA[*]} ${EXTRA_DOCKER_ARGS:-}"
 )
 if [[ "$SPEC_TOKENS" != 0 ]]; then
@@ -565,7 +792,7 @@ if [[ "$SPEC_TOKENS" != 0 ]]; then
   RUN_ENV+=(KV_RECORD=nvfp4 INDEXER_KV_DTYPE=mxfp4 KV_MODE=auto KV_OFFLOAD_GIB=0)
 fi
 
-echo "launch: NAME=$NAME PORT=$PORT eager=$EAGER transport=$AFD_TRANSPORT seam=$AFD_SEAM capture=[$CAPTURE_SIZES] max_capture=$MAX_CAPTURE spec=$SPEC_TOKENS gpu_mem_util=$GPU_MEM_UTIL" >&2
+echo "launch: NAME=$NAME PORT=$PORT eager=$EAGER transport=$AFD_TRANSPORT seam=$AFD_SEAM capture=[$CAPTURE_SIZES] max_capture=$MAX_CAPTURE spec=$SPEC_TOKENS gpu_mem_util=$GPU_MEM_UTIL max_model_len=$MAX_MODEL_LEN max_num_seqs=$MAX_NUM_SEQS max_num_batched_tokens=$MAX_NUM_BATCHED_TOKENS kv_cache_bytes=${KV_CACHE_BYTES:-unset}" >&2
 
 if [[ "$DRY_RUN" == 1 ]]; then
   echo "launch: DRY_RUN=1 (nothing restarted or launched)" >&2
