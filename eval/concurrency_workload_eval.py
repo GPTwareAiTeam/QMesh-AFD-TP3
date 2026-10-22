@@ -3,11 +3,15 @@
 
 Campaign
 --------
-Four fixture types (code, prose, json, toolagent), two workload shapes
-(prefill: 2048 prompt / 1 forced output; decode: 512 prompt / 2048 forced
-output), four concurrency levels (1, 2, 4, 8), two measured repeats, and one
-excluded warmup request per execution configuration.  That is 64 measured
-groups and 240 measured requests.
+Four distinct fixture types (prose, structured, code, reasoning), two workload
+shapes (prefill: 2048 prompt / 1 forced output; decode: 512 prompt / 2048
+forced output), four concurrency levels (1, 2, 4, 8), two measured repeats,
+and one excluded warmup request per execution configuration.  That is 64
+measured groups and 240 measured requests.
+
+The four fixtures are the authored documents in ``fixtures_distinct.py``.
+They are not the older reusable ``fixtures_contexts.py`` variants, and their
+full task instructions (head and tail) are never truncated.
 
 Every group is a gate-synchronized release: all C requests are connected and
 waiting on an asyncio gate; the gate release timestamp starts the group clock.
@@ -15,14 +19,17 @@ Groups run one at a time, after the engine reports idle.
 
 Exactness
 ---------
-Prompts are built with the served /tokenize + /detokenize endpoints (via the
-existing ``dspark_workload_eval.Tokenizer``/``build_exact_prompt``), and the
-same prompt is reused for all requests in a (type, shape).  Prefix caching is
-required to be off.  Completion is forced with ``max_tokens == min_tokens``
-and ``ignore_eos``.  The final SSE usage object is the completion-token
-authority; ``return_token_ids`` supplies the actual chunk token IDs.  Prompt
-tokens are verified from usage and from the first chunk's prompt_token_ids.
-Forced continuations are timing evidence only, never quality evidence.
+Prompts are built by ``fixtures_distinct`` from the served ``/tokenize``
+endpoint and are sent through the raw ``/v1/completions`` endpoint.  The exact
+prompt text, token IDs, per-prompt hashes, head/tail preservation proof, and
+retokenization proof are saved in ``prompts.json``/``prompt_token_ids.jsonl``.
+The same prompt is reused for all requests in a (type, shape).  Prefix caching
+is required to be off.  Completion is forced with ``max_tokens ==
+min_tokens`` and ``ignore_eos``.  The final SSE usage object is the
+completion-token authority; ``return_token_ids`` supplies the actual chunk
+token IDs.  Prompt tokens are verified from usage and from the first chunk's
+prompt_token_ids.  Forced continuations are timing evidence only, never
+quality evidence, and no chat template is applied.
 
 Engineering accounting
 ----------------------
@@ -34,11 +41,11 @@ Engineering accounting
 * engine prefill is request-scoped only: the engine's finished-request event
   (prefill_time_s, queue_time_s separate) joined by response id.  Median and
   peak engine prefill tokens/s are emitted only from those events.
-* if request events are absent, the Prometheus per-request prefill histograms
-  are used only for the group aggregate (sum computed tokens / sum prefill
-  wall); median/peak stay null and the source is labelled
-  ``engine_histogram_group_delta``.  TTFT is never relabelled as prefill and
-  GPU time is never relabelled as engine prefill.
+* DSpark speculative counters come from per-group idle before/after deltas of
+  the engine's ``vllm:spec_decode_num_*_total`` counters.  Acceptance is
+  ``sum(accepted)/sum(proposed)``, never a mean of group ratios.  Steps are
+  ``num_drafts_total``; proposed tokens are ``num_draft_tokens_total``.
+  Per-position unconditional acceptance is accepted_at_position/steps.
 
 Usage
 -----
@@ -78,15 +85,21 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from fixtures_contexts import FIXTURES  # noqa: E402
+from fixtures_distinct import (  # noqa: E402
+    CONTEXT_TYPES,
+    FIXTURE_IDS,
+    FIXTURES as DISTINCT_FIXTURES,
+    build_prompt_set as build_distinct_prompt_set,
+    fixtures_digest,
+    prompt_definitions as distinct_prompt_definitions,
+    validate_prompt as validate_distinct_prompt,
+)
 from dspark_workload_eval import (  # noqa: E402
     MODEL,
     Tokenizer,
     append_jsonl,
-    build_exact_prompt,
     counter_total,
     fetch_metrics_text,
-    fixture_digest,
     health_check,
     metric_value,
     now_iso,
@@ -120,31 +133,61 @@ ENGINE_EVENT_REQUIRED_FIELDS = (
     "finished_ts",
 )
 
-# The fixture file already ships these documents and exact instruction tails.
-# Reusing them avoids a second, divergent corpus or tokenizer convention.
+# One authored fixture per context type.  The fixture map is evidence in the
+# plan; the prompts themselves are built by fixtures_distinct.
 TYPE_FIXTURES = {
-    "code": ("code_generation", "codegen-a"),
-    "prose": ("prose", "prose-a"),
-    "json": ("json_schema_output", "json-a"),
-    "toolagent": ("tool_agent_exchange", "tool-a"),
+    (fixture.get("context_type") or fixture.get("type")): fixture["fixture_id"]
+    for fixture in DISTINCT_FIXTURES
 }
 SHAPE_SPECS = {
     "prefill": {"prompt_tokens": 2048, "completion_tokens": 1},
     "decode": {"prompt_tokens": 512, "completion_tokens": 2048},
 }
-TYPE_ALIASES = {
-    "code": "code",
-    "prose": "prose",
-    "json": "json",
-    "toolagent": "toolagent",
-    "tool-agent": "toolagent",
-    "tool_agent": "toolagent",
-    "toolagentexchange": "toolagent",
-}
 DEFAULT_CONCURRENCY = [1, 2, 4, 8]
 DEFAULT_REPEATS = 2
 DEFAULT_WARMUP = 1
 DEFAULT_ENGINE_EVENT_FILE = "/tmp/afd_dump/cwb-engine-events.jsonl"
+DEFAULT_SPEC_K = 5
+SPEC_STEPS_METRIC = "vllm:spec_decode_num_drafts_total"
+SPEC_PROPOSED_METRIC = "vllm:spec_decode_num_draft_tokens_total"
+SPEC_ACCEPTED_METRIC = "vllm:spec_decode_num_accepted_tokens_total"
+SPEC_ACCEPTED_POS_METRIC = (
+    "vllm:spec_decode_num_accepted_tokens_per_pos_total")
+SPEC_CREATED_GAUGES = (
+    "vllm:spec_decode_num_drafts_created",
+    "vllm:spec_decode_num_draft_tokens_created",
+    "vllm:spec_decode_num_accepted_tokens_created",
+    "vllm:spec_decode_num_accepted_tokens_per_pos_created",
+)
+SPEC_METRIC_DEFINITIONS = {
+    "steps": (
+        f"{SPEC_STEPS_METRIC}: engine draft/step count; this is the number of "
+        "speculative decode steps, not proposed tokens."),
+    "proposed_tokens": (
+        f"{SPEC_PROPOSED_METRIC}: proposed draft tokens. K5 should satisfy "
+        "proposed == 5 * steps; this is a token count, not a step count."),
+    "accepted_tokens": (
+        f"{SPEC_ACCEPTED_METRIC}: accepted draft tokens. Acceptance = "
+        "sum(accepted)/sum(proposed), never a mean of per-group ratios."),
+    "accepted_per_position": (
+        f'{SPEC_ACCEPTED_POS_METRIC}{{position="0".."4"}}: accepted draft '
+        "tokens at each speculative position. Positional unconditional "
+        "acceptance = accepted_at_position / steps."),
+    "emitted_per_step_theoretical": (
+        "1 + sum(accepted)/sum(steps): counter-derived tokens emitted per "
+        "speculative step, including the bonus token. Not the same as a "
+        "client-observed throughput rate and subject to final output-limit "
+        "truncation."),
+    "emitted_per_step_actual": (
+        "generation_tokens_total delta / steps: actual engine token counter "
+        "per speculative step, including the first generated token and final "
+        "output-limit truncation; reported as a counter check, not a pure "
+        "decode-step rate."),
+    "created_gauges": (
+        "The *_created gauges are static metric-object creation timestamps, "
+        "emitted once. They are never update/flush markers, never used to "
+        "settle a group, and always excluded from deltas and acceptance."),
+}
 
 # Source-inspected K5 cache geometry.  The engine-reported num_gpu_blocks is
 # authoritative for the boot actually measured; these constants only make the
@@ -189,6 +232,7 @@ METRIC_PREFIXES = (
     "vllm:request_queue_time_seconds",
     "vllm:request_success_total",
     "vllm:request_admission_rejections_total",
+    "vllm:spec_decode_num_",
 )
 
 LABEL_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"')
@@ -319,82 +363,311 @@ def histogram_deltas(before: dict, after: dict) -> dict:
             counter_total(after, name) - counter_total(before, name))
     return out
 
+# ---------------------------------------------------------------------------
+# DSpark speculative decode counters
+# ---------------------------------------------------------------------------
+
+def spec_snapshot(series: dict) -> dict:
+    """Selected counter snapshot; *_created is a static object timestamp."""
+    per_pos = {}
+    for key, value in metric_series(series, SPEC_ACCEPTED_POS_METRIC).items():
+        position = parse_labels(key).get("position")
+        if position is None:
+            continue
+        per_pos[str(position)] = per_pos.get(str(position), 0.0) + float(value)
+    created = []
+    for name in SPEC_CREATED_GAUGES:
+        for value in metric_series(series, name).values():
+            try:
+                created.append(float(value))
+            except (TypeError, ValueError):
+                continue
+    return {
+        "steps": counter_total(series, SPEC_STEPS_METRIC),
+        "proposed_tokens": counter_total(series, SPEC_PROPOSED_METRIC),
+        "accepted_tokens": counter_total(series, SPEC_ACCEPTED_METRIC),
+        "accepted_per_position": dict(sorted(
+            per_pos.items(), key=lambda item: int(item[0]))),
+        "created_max": max(created) if created else None,
+        "counter_present": any(
+            key.startswith(SPEC_STEPS_METRIC)
+            or key.startswith(SPEC_PROPOSED_METRIC)
+            or key.startswith(SPEC_ACCEPTED_METRIC)
+            for key in series),
+    }
+
+
+def spec_delta(before: dict, after: dict) -> dict:
+    before_pos = before.get("accepted_per_position") or {}
+    after_pos = after.get("accepted_per_position") or {}
+    positions = sorted(set(before_pos) | set(after_pos),
+                       key=lambda value: int(value))
+    per_pos = {
+        position: (
+            float(after_pos.get(position, 0.0))
+            - float(before_pos.get(position, 0.0)))
+        for position in positions
+    }
+    return {
+        "steps_delta": float(after.get("steps") or 0.0)
+        - float(before.get("steps") or 0.0),
+        "proposed_tokens_delta": float(after.get("proposed_tokens") or 0.0)
+        - float(before.get("proposed_tokens") or 0.0),
+        "accepted_tokens_delta": float(after.get("accepted_tokens") or 0.0)
+        - float(before.get("accepted_tokens") or 0.0),
+        "accepted_per_position_delta": per_pos,
+        "created_after": after.get("created_max"),
+        "counter_present": bool(
+            before.get("counter_present") or after.get("counter_present")),
+    }
+
+
+def speculative_summary(shape: str, delta: dict, generation_tokens_delta,
+                        spec_k: int, strict: bool) -> dict:
+    """Validate one group's counter delta and derive acceptance fields."""
+    steps = float(delta.get("steps_delta") or 0.0)
+    proposed = float(delta.get("proposed_tokens_delta") or 0.0)
+    accepted = float(delta.get("accepted_tokens_delta") or 0.0)
+    per_pos_raw = delta.get("accepted_per_position_delta") or {}
+    per_pos = {
+        str(position): float(value)
+        for position, value in per_pos_raw.items()
+    }
+    errors = []
+    if not delta.get("counter_present"):
+        errors.append("spec_counters_missing")
+    for name, value in (
+            ("steps", steps), ("proposed", proposed), ("accepted", accepted),
+            *[(f"accepted_pos_{position}", value)
+              for position, value in per_pos.items()]):
+        if value < 0:
+            errors.append(f"spec_counter_reset_or_negative:{name}={value}")
+    positions = sorted(per_pos, key=lambda value: int(value))
+    if accepted > proposed:
+        errors.append(
+            f"spec_accepted_exceeds_proposed:{accepted}>{proposed}")
+    if per_pos:
+        per_pos_sum = sum(per_pos.values())
+        if abs(per_pos_sum - accepted) > 1e-9:
+            errors.append(
+                "spec_accepted_per_pos_sum_mismatch:"
+                f"{per_pos_sum}!={accepted}")
+        for left, right in zip(positions, positions[1:]):
+            if per_pos[left] < per_pos[right]:
+                errors.append(
+                    "spec_per_position_not_monotone:"
+                    f"position_{left}<position_{right}")
+    else:
+        errors.append("spec_per_position_counters_missing")
+    if spec_k and steps <= 0 and proposed > 0:
+        errors.append("spec_steps_zero_with_proposed_tokens")
+    if spec_k and steps > 0 and accepted > 0:
+        expected_positions = [str(index) for index in range(spec_k)]
+        for position in expected_positions:
+            if position not in per_pos:
+                errors.append(
+                    f"spec_required_position_missing:{position}")
+        if len(expected_positions) == spec_k:
+            for position in positions:
+                if int(position) >= spec_k and per_pos[position] > 0:
+                    errors.append(
+                        f"spec_unexpected_position:{position}")
+    if strict and spec_k:
+        expected_proposed = spec_k * steps
+        if abs(expected_proposed - proposed) > 1e-9:
+            errors.append(
+                "spec_k_proposed_mismatch:"
+                f"expected_{spec_k}*steps={expected_proposed},"
+                f"actual={proposed}")
+    acceptance = accepted / proposed if proposed > 0 else None
+    applicable = shape == "decode"
+    if applicable:
+        if steps <= 0:
+            errors.append("spec_decode_steps_zero")
+        if proposed <= 0:
+            errors.append("spec_decode_proposed_zero")
+    else:
+        if proposed <= 0:
+            if accepted != 0 or steps != 0:
+                errors.append(
+                    "spec_prefill_zero_proposed_with_nonzero_counters")
+        # A prefill group's spec counters are evidence, not a primary ratio.
+    per_position_acceptance = {
+        position: (per_pos[position] / steps if steps > 0 else None)
+        for position in positions
+    }
+    out = {
+        "shape": shape,
+        "primary": applicable,
+        "applicable": applicable,
+        "acceptance": acceptance,
+        "acceptance_definition": "sum(accepted)/sum(proposed)",
+        "acceptance_null_reason": (
+            None if acceptance is not None
+            else "no_proposed_tokens_in_group"),
+        "steps_delta": steps,
+        "proposed_tokens_delta": proposed,
+        "accepted_tokens_delta": accepted,
+        "accepted_per_position_delta": per_pos,
+        "per_position_acceptance": per_position_acceptance,
+        "per_position_definition": "accepted_at_position/steps",
+        "emitted_per_step_theoretical": (
+            1.0 + accepted / steps if steps > 0 else None),
+        "emitted_per_step_actual": (
+            float(generation_tokens_delta) / steps
+            if steps > 0 and generation_tokens_delta is not None else None),
+        "emitted_per_step_actual_caveat": (
+            "generation_tokens_total delta includes the first generated token "
+            "and final output-limit truncation; it is not a pure decode-step "
+            "rate."),
+        "spec_k": spec_k,
+        "expected_proposed_tokens": (
+            spec_k * steps if spec_k and steps >= 0 else None),
+        "counter_source": "per_group_idle_before_after_engine_metrics",
+        "created_after": delta.get("created_after"),
+        "strict": strict,
+        "errors": errors,
+    }
+    return out
+
 
 # ---------------------------------------------------------------------------
 # fixtures and exact prompts
 # ---------------------------------------------------------------------------
 
-def fixture_for_type(ctype: str):
-    fixture_type, variant_id = TYPE_FIXTURES[ctype]
-    fixture = next(f for f in FIXTURES if f["type"] == fixture_type)
-    variant = next(
-        v for v in fixture["variants"] if v["prompt_id"] == variant_id)
-    return fixture, variant
+def build_distinct_prompts(tok: Tokenizer, types: list[str]) -> dict:
+    """Build the authored campaign prompts exactly once via /tokenize."""
+    fixture_ids = [TYPE_FIXTURES[ctype] for ctype in types]
+    built = build_distinct_prompt_set(
+        tok, fixture_ids=fixture_ids, shapes=tuple(SHAPE_SPECS))
+    prompts = {}
+    for (fixture_id, shape), raw in built.items():
+        prompt = dict(raw)
+        ctype = prompt.get("context_type")
+        if ctype not in types:
+            continue
+        if shape not in SHAPE_SPECS:
+            raise RuntimeError(f"{fixture_id}/{shape}: unknown shape")
+        target = SHAPE_SPECS[shape]["prompt_tokens"]
+        prompt["completion_tokens"] = (
+            SHAPE_SPECS[shape]["completion_tokens"])
+        prompt["target_prompt_tokens"] = target
+        text = prompt["prompt_text"]
+        builder_ids = [int(value) for value in raw.get(
+            "prompt_token_ids") or []]
+        ids = tok.ids(text)
+        prompt["prompt_token_ids"] = ids
+        prompt["builder_token_id_sha256"] = sha256_text(
+            ",".join(str(token_id) for token_id in builder_ids))
+        prompt["prompt_sha256"] = sha256_text(text)
+        prompt["prompt_chars"] = len(text)
+        prompt["tokenize_count"] = tok.count(text)
+        prompt["tokenize_count_exact"] = prompt["tokenize_count"] == target
+        prompt["token_id_sha256"] = sha256_text(
+            ",".join(str(token_id) for token_id in ids))
+        prompt["head_text"] = prompt.get("head_text")
+        prompt["tail_text"] = prompt.get("tail_text")
+        checks = {
+            "length_exact": len(ids) == target,
+            "retokenize_exact": ids == builder_ids,
+            "builder_ids_present": bool(builder_ids),
+
+            "prompt_hash_matches_builder": (
+                prompt["prompt_sha256"] == raw.get("prompt_sha256")),
+            "head_prefix": (
+                isinstance(prompt["head_text"], str)
+                and text.startswith(prompt["head_text"])),
+            "tail_suffix": (
+                isinstance(prompt["tail_text"], str)
+                and text.endswith(prompt["tail_text"])),
+            "head_preserved": bool(raw.get("head_text_preserved")),
+            "tail_preserved": bool(raw.get("tail_text_preserved")),
+            "tail_within_512": bool(raw.get("tail_within_512")),
+            "tail_token_ids_contiguous": bool(
+                raw.get("tail_token_ids_contiguous")),
+        }
+        prompt["validation"] = validate_distinct_prompt(tok, raw)
+        checks["builder_validation"] = bool(
+            prompt["validation"].get("ok"))
+        prompt["checks"] = checks
+        prompt["valid"] = all(checks.values())
+        prompt["invalid_reasons"] = sorted(
+            name for name, ok in checks.items() if not ok)
+        prompt["detokenize_roundtrip_identical"] = (
+            tok.detokenize(ids) == text
+            if hasattr(tok, "detokenize") else None)
+        prompt["detokenize_note"] = (
+            "informational only: prompts are built as text and verified by "
+            "retokenization; detokenize concatenation is never used to "
+            "construct or compare prompt text")
+        prompts[(ctype, shape)] = prompt
+    missing = [
+        (ctype, shape) for ctype in types for shape in SHAPE_SPECS
+        if (ctype, shape) not in prompts]
+    if missing:
+        raise RuntimeError(f"missing distinct prompts: {missing}")
+    invalid = {
+        f"{ctype}/{shape}": prompt.get("invalid_reasons")
+        for (ctype, shape), prompt in prompts.items()
+        if not prompt.get("valid")}
+    if invalid:
+        raise RuntimeError(f"distinct prompt validation failed: {invalid}")
+    return prompts
 
 
-def expanded_body(tok: Tokenizer, base_body: str, need: int) -> tuple[str, int]:
-    """Repeat the fixture's own long body until the cut has enough tokens.
-
-    The fixture documents are shorter than 2048 tokens, especially for prose.
-    Repetition is deterministic runtime expansion of the existing fixture, not
-    a new authored corpus; the exact builder still cuts at a token boundary.
-    """
-    body = base_body
-    repeats = 1
-    while tok.count(body) < need + 16 and repeats < 12:
-        body = body + "\n\n" + base_body
-        repeats += 1
-    if tok.count(body) < need + 16:
-        raise RuntimeError(
-            f"fixture body still has {tok.count(body)} tokens after "
-            f"{repeats} repeats; need {need + 16}")
-    return body, repeats
-
-
-def build_prompt_set(tok: Tokenizer, types: list[str]) -> dict:
+def build_smoke_prompts(tok: Tokenizer, types: list[str]) -> dict:
+    """Synthetic prompts for the offline smoke server (never campaign data)."""
     prompts = {}
     for ctype in types:
-        fixture, variant = fixture_for_type(ctype)
         for shape, spec in SHAPE_SPECS.items():
             target = spec["prompt_tokens"]
-            head = variant["head"]
-            tail = variant["tail"]
-            need = target - tok.count(head) - tok.count(tail)
-            if need < 16:
-                raise RuntimeError(
-                    f"{ctype}/{shape}: head+tail leave only {need} body tokens")
-            body, repeats = expanded_body(tok, fixture["long_body"], need)
-            built = build_exact_prompt(tok, head, body, tail, target)
-            if built["actual"] != target:
-                raise RuntimeError(
-                    f"{ctype}/{shape}: built {built['actual']} tokens, "
-                    f"target {target}")
-            ids = tok.ids(built["text"])
-            if len(ids) != target:
-                raise RuntimeError(
-                    f"{ctype}/{shape}: /tokenize ids {len(ids)} != {target}")
-            key = (ctype, shape)
-            prompts[key] = {
+            head = f"HEAD {ctype} {shape} full task.\n"
+            tail = f"\nANSWER/RESPONSE {ctype} {shape}: complete all data."
+            body = "body " * (target + 8)
+            text = (head + body)[:target - len(tail)] + tail
+            ids = tok.ids(text)
+            prompts[(ctype, shape)] = {
+                "fixture_id": f"smoke-{ctype}",
                 "context_type": ctype,
-                "fixture_type": fixture["type"],
-                "variant": variant["prompt_id"],
                 "shape": shape,
                 "target_prompt_tokens": target,
                 "completion_tokens": spec["completion_tokens"],
-                "prompt_text": built["text"],
-                "prompt_sha256": built["sha256"],
-                "prompt_chars": built["chars"],
+                "prompt_text": text,
                 "prompt_token_ids": ids,
-                "body_key": "long_body",
-                "body_repeats": repeats,
-                "head_tokens": built["head_tokens"],
-                "tail_tokens": built["tail_tokens"],
-                "body_tokens_used": built["body_tokens_used"],
-                "connector": built["connector"],
-                "boundary_score": built["boundary_score"],
-                "fitting_iterations": built["iterations"],
+                "prompt_sha256": sha256_text(text),
+                "prompt_chars": len(text),
+                "head_text": head,
+                "tail_text": tail,
+                "head_tokens": tok.count(head),
+                "tail_tokens": tok.count(tail),
+                "body_tokens_used": tok.count(text) - tok.count(head)
+                - tok.count(tail),
+                "body_variant": "smoke",
+                "connector": "smoke",
+                "boundary_score": 0,
+                "fitting_iterations": 0,
                 "add_special_tokens": False,
-                "tokenizer_source": "/tokenize",
+                "tokenizer_source": "smoke_char_ordinal",
+                "tail_text_preserved": True,
+                "head_text_preserved": True,
+                "tail_within_512": tok.count(tail) <= 512,
+                "tail_token_ids_contiguous": True,
+                "retokenize_exact": ids == tok.ids(text),
+                "tokenize_count": tok.count(text),
+                "tokenize_count_exact": tok.count(text) == target,
+                "token_id_sha256": sha256_text(
+                    ",".join(str(token_id) for token_id in ids)),
+                "checks": {
+                    "length_exact": len(ids) == target,
+                    "retokenize_exact": ids == tok.ids(text),
+                    "head_prefix": text.startswith(head),
+                    "tail_suffix": text.endswith(tail),
+                },
+                "validation": {"ok": True, "errors": [], "details": {}},
+                "valid": True,
+                "invalid_reasons": [],
+                "detokenize_roundtrip_identical": True,
+                "detokenize_note": "smoke informational only",
             }
     return prompts
 
@@ -407,13 +680,18 @@ def normalize_types(values) -> list[str]:
     out = []
     for value in values:
         key = value.strip().lower()
-        if key not in TYPE_ALIASES:
+        if key not in CONTEXT_TYPES:
             raise SystemExit(
-                f"unknown type {value!r}; choose from {sorted(TYPE_FIXTURES)}")
-        ctype = TYPE_ALIASES[key]
-        if ctype not in out:
-            out.append(ctype)
+                f"unknown type {value!r}; choose from {list(CONTEXT_TYPES)}")
+        if key not in out:
+            out.append(key)
     return out
+
+
+# ---------------------------------------------------------------------------
+# campaign plan
+# ---------------------------------------------------------------------------
+
 
 
 def build_plan(types, shapes, concurrencies, repeats, warmup) -> dict:
@@ -433,6 +711,8 @@ def build_plan(types, shapes, concurrencies, repeats, warmup) -> dict:
                         "repeat": repeat,
                         "phase": "measured",
                         "requests": concurrency,
+                        "fixture_id": TYPE_FIXTURES[ctype],
+                        "prompt_source": "fixtures_distinct",
                         "prompt_tokens": SHAPE_SPECS[shape]["prompt_tokens"],
                         "completion_tokens": SHAPE_SPECS[shape][
                             "completion_tokens"],
@@ -452,6 +732,8 @@ def build_plan(types, shapes, concurrencies, repeats, warmup) -> dict:
                         "repeat": repeat,
                         "phase": "warmup",
                         "requests": 1,
+                        "fixture_id": TYPE_FIXTURES[ctype],
+                        "prompt_source": "fixtures_distinct",
                         "prompt_tokens": SHAPE_SPECS[shape]["prompt_tokens"],
                         "completion_tokens": SHAPE_SPECS[shape][
                             "completion_tokens"],
@@ -467,10 +749,19 @@ def build_plan(types, shapes, concurrencies, repeats, warmup) -> dict:
         "warmup_per_configuration": warmup,
         "shape_specs": SHAPE_SPECS,
         "fixture_map": {
-            ctype: {"fixture_type": TYPE_FIXTURES[ctype][0],
-                    "variant": TYPE_FIXTURES[ctype][1]}
+            ctype: {"fixture_id": TYPE_FIXTURES[ctype]}
             for ctype in types
         },
+        "endpoint": "/v1/completions",
+        "continuation_mode": "raw_completion_no_chat_template",
+        "execution_order": (
+            "warmups first (one execution per type/shape/concurrency, "
+            "excluded), then measured groups in group_id order"),
+        "metrics_settle": (
+            "raw /metrics before each group; monitor starts before gate "
+            "release; engine idle after the group; exact expected prompt/"
+            "generation/success deltas must repeat in two consecutive "
+            "polls; *_created gauges are static and ignored"),
         "groups": groups,
         "warmups": warmups,
         "totals": {
@@ -669,11 +960,21 @@ def http_limits(httpx, max_concurrency: int):
     )
 
 
-async def fetch_metrics_async(client, base_url: str) -> dict:
+async def fetch_metrics_text_async(client, base_url: str) -> str:
     response = await client.get(base_url.rstrip("/") + "/metrics",
                                 timeout=10.0)
     response.raise_for_status()
-    return parse_metrics(response.text)
+    return response.text
+
+
+async def fetch_metrics_bundle_async(client, base_url: str):
+    text = await fetch_metrics_text_async(client, base_url)
+    return parse_metrics(text), text
+
+
+async def fetch_metrics_async(client, base_url: str) -> dict:
+    series, _ = await fetch_metrics_bundle_async(client, base_url)
+    return series
 
 
 async def fetch_models_async(client, base_url: str) -> dict:
@@ -1111,8 +1412,36 @@ async def run_group(client, base_url: str, group: dict, prompt: dict,
     tasks = [asyncio.create_task(one(i))
              for i in range(group["concurrency"])]
     await asyncio.gather(*(event.wait() for event in ready))
+
+    # The before snapshot and monitor MUST exist while the group is still
+    # gated.  Taking either after the requests would silently lose the
+    # in-group counters and make the window tautological.
+    events.refresh()
+    engine_event_lines_before = events.lines
+    before_series = None
+    metrics_error = None
+    samples = []
+    stop_event = asyncio.Event()
+    monitor = None
+    if args.metrics:
+        try:
+            before_series, before_text = await fetch_metrics_bundle_async(
+                client, base_url)
+            dump_path = Path(args.out) / "metrics" / (
+                f"{safe_name(group['group_id'])}.before.txt")
+            dump_path.parent.mkdir(parents=True, exist_ok=True)
+            dump_path.write_text(before_text)
+            samples.append(snapshot_row(before_series, time.monotonic()))
+        except Exception as exc:  # noqa: BLE001 - fail the group later
+            metrics_error = f"{type(exc).__name__}: {exc}"
+        monitor = asyncio.create_task(
+            metrics_monitor(client, base_url, args.metrics_interval,
+                            stop_event, samples))
+        await asyncio.sleep(0)
+
     group_start = time.monotonic()
     gate_start[0] = group_start
+    release_unix = time.time()
     release_iso = now_iso()
     gate.set()
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -1123,6 +1452,40 @@ async def run_group(client, base_url: str, group: dict, prompt: dict,
     events_ok = await events.wait_for(
         request_ids, args.engine_event_timeout) if request_ids else False
     events.refresh()
+    engine_event_lines_after = events.lines
+    idle_after = await wait_idle_async(
+        client, base_url, args.idle_timeout) if args.metrics else {}
+    after_series = None
+    settle = {
+        "settled": False,
+        "waited_ms": None,
+        "polls": 0,
+        "created_after": None,
+        "timeout_s": getattr(args, "metrics_settle_timeout", None),
+        "skipped": not args.metrics,
+    }
+    if args.metrics and before_series is not None:
+        expected = {
+            "prompt_tokens": group["concurrency"] * group["prompt_tokens"],
+            "generation_tokens": (
+                group["concurrency"] * group["completion_tokens"]),
+            "request_success": group["concurrency"],
+        }
+        after_series, settle = await settle_spec_after_group(
+            client, base_url, release_unix, args,
+            before_series=before_series, expected=expected,
+            out_dir=args.out, group_id=group["group_id"])
+        settle["raw_before_path"] = str(
+            Path(args.out) / "metrics" / (
+                f"{safe_name(group['group_id'])}.before.txt"))
+        if after_series is not None:
+            samples.append(snapshot_row(after_series, time.monotonic()))
+    if monitor is not None:
+        stop_event.set()
+        try:
+            await asyncio.wait_for(monitor, timeout=5.0)
+        except asyncio.TimeoutError:
+            monitor.cancel()
     for row in rows:
         response_id = row.get("response_id")
         request_id = row.get("request_id")
@@ -1150,7 +1513,17 @@ async def run_group(client, base_url: str, group: dict, prompt: dict,
         "valid_requests": sum(1 for row in rows if row.get("valid")),
         "invalid_requests": sum(1 for row in rows if not row.get("valid")),
         "release_iso": release_iso,
-        "release_unix_s": time.time() - (time.monotonic() - group_start),
+        "release_unix_s": release_unix,
+        "metrics_error": metrics_error,
+        "idle_before": {
+            "running": (
+                metric_value(before_series, "vllm:num_requests_running")
+                if before_series is not None else None),
+            "waiting": (
+                metric_value(before_series, "vllm:num_requests_waiting")
+                if before_series is not None else None),
+        },
+        "idle_after": idle_after,
         "group_wall_s": group_end - group_start,
         "request_start_spread_ms": (
             max((row.get("send_ts_rel_ms") or 0.0) for row in rows)
@@ -1194,11 +1567,43 @@ async def run_group(client, base_url: str, group: dict, prompt: dict,
         "engine_events" if all(row.get("engine_event_present") for row in rows)
         else "none")
 
-    before_series, after_series, samples = await sample_group_metrics(
-        client, base_url, args, group_start, group_end)
-    if before_series is not None:
+    group_metrics = None
+    if before_series is not None and after_series is not None:
         group_metrics = histogram_deltas(before_series, after_series)
+        group_metrics["request_success_total_delta"] = (
+            counter_total(after_series, "vllm:request_success_total")
+            - counter_total(before_series, "vllm:request_success_total"))
+        group_metrics["request_success_total_present"] = any(
+            key.startswith("vllm:request_success_total")
+            for key in after_series)
         group_row["metrics"] = group_metrics
+        generation_tokens_delta = group_metrics.get(
+            "generation_tokens_total_delta")
+        spec = speculative_summary(
+            group["shape"],
+            spec_delta(spec_snapshot(before_series),
+                       spec_snapshot(after_series)),
+            generation_tokens_delta,
+            getattr(args, "spec_k", DEFAULT_SPEC_K),
+            getattr(args, "spec_strict", True))
+        group_metrics["speculative"] = spec
+        group_row["speculative"] = spec
+        group_row["metrics_window"] = {
+            "definition": (
+                "idle before snapshot -> monitor started before gate release "
+                "-> group -> engine idle -> bounded counter settle -> after "
+                "snapshot"),
+            "before": snapshot_row(before_series, group_start),
+            "after": snapshot_row(
+                after_series, time.monotonic()),
+            "before_series": selected_metrics(before_series),
+            "after_series": selected_metrics(after_series),
+            "samples": samples,
+            "settle": settle,
+            "monitor_interval_s": args.metrics_interval,
+            "monitor_started_before_gate": True,
+            "sample_count": len(samples),
+        }
         group_row["kv_cache_usage_perc_max"] = max(
             (s.get("kv_cache_usage_perc") or 0.0)
             for s in samples if "error" not in s) if samples else None
@@ -1289,12 +1694,133 @@ async def run_group(client, base_url: str, group: dict, prompt: dict,
         group_row["engine_prefill_group_tokens_per_s"])
     if not prefills and group_row["engine_prefill_group_tokens_per_s"]:
         group_row["engine_prefill_source"] = "engine_histogram_group_delta"
+    expected_prompt = sum(
+        (row.get("prompt_tokens_usage") or group["prompt_tokens"])
+        for row in rows)
+    expected_generation = sum(
+        (row.get("completion_tokens_usage") or group["completion_tokens"])
+        for row in rows)
+    request_success_present = bool(
+        group_metrics and group_metrics.get("request_success_total_present"))
+    request_success_delta = (
+        group_metrics.get("request_success_total_delta")
+        if group_metrics else None)
+    prompt_delta = (
+        group_metrics.get("prompt_tokens_total_delta")
+        if group_metrics else None)
+    generation_delta = (
+        group_metrics.get("generation_tokens_total_delta")
+        if group_metrics else None)
+    event_line_delta = (
+        engine_event_lines_after - engine_event_lines_before
+        if events.path is not None else None)
+    before_running = group_row["idle_before"].get("running")
+    before_waiting = group_row["idle_before"].get("waiting")
+    after_running = (
+        metric_value(after_series, "vllm:num_requests_running")
+        if after_series is not None else None)
+    after_waiting = (
+        metric_value(after_series, "vllm:num_requests_waiting")
+        if after_series is not None else None)
+    request_ids_unique = (
+        len(request_ids) == len(set(request_ids))
+        and all(request_ids))
+    exclusive_errors = []
+    if before_running not in (None, 0.0) or before_waiting not in (None, 0.0):
+        exclusive_errors.append("engine_not_idle_before_group")
+    if after_running not in (None, 0.0) or after_waiting not in (None, 0.0):
+        exclusive_errors.append("engine_not_idle_after_group")
+    if prompt_delta is not None and prompt_delta != expected_prompt:
+        exclusive_errors.append(
+            f"prompt_tokens_delta_mismatch:{prompt_delta}!={expected_prompt}")
+    if (generation_delta is not None
+            and generation_delta != expected_generation):
+        exclusive_errors.append(
+            "generation_tokens_delta_mismatch:"
+            f"{generation_delta}!={expected_generation}")
+    if request_success_present:
+        if request_success_delta != len(rows):
+            exclusive_errors.append(
+                "request_success_delta_mismatch:"
+                f"{request_success_delta}!={len(rows)}")
+    elif not (event_line_delta == len(rows)
+              and generation_delta == expected_generation):
+        exclusive_errors.append(
+            "request_success_unavailable_and_event_or_generation_mismatch")
+    if event_line_delta is None:
+        exclusive_errors.append("engine_event_line_delta_unavailable")
+    elif event_line_delta != len(rows):
+        exclusive_errors.append(
+            f"engine_event_line_delta_mismatch:{event_line_delta}!={len(rows)}")
+    if not request_ids_unique:
+        exclusive_errors.append("duplicate_or_missing_request_ids")
+    exclusive = {
+        "required": bool(getattr(args, "require_exclusive", True)),
+        "request_success_total_present": request_success_present,
+        "request_success_delta": request_success_delta,
+        "request_success_expected": len(rows),
+        "request_success_source": (
+            "metrics_total" if request_success_present
+            else "engine_event_lines_and_generation_fallback"),
+        "prompt_tokens_delta": prompt_delta,
+        "prompt_tokens_expected": expected_prompt,
+        "generation_tokens_delta": generation_delta,
+        "generation_tokens_expected": expected_generation,
+        "engine_event_lines_before": engine_event_lines_before,
+        "engine_event_lines_after": engine_event_lines_after,
+        "engine_event_line_delta": event_line_delta,
+        "engine_event_lines_expected": len(rows),
+        "request_ids_unique": request_ids_unique,
+        "idle_before": group_row["idle_before"],
+        "idle_after": {
+            "running": after_running, "waiting": after_waiting},
+        "errors": exclusive_errors,
+    }
+    group_row["exclusive"] = exclusive
+    group_row["metrics_window"] = group_row.get("metrics_window") or {
+        "definition": (
+            "idle before snapshot -> monitor started before gate release -> "
+            "group -> engine idle -> bounded counter settle -> after snapshot"),
+        "before": {},
+        "after": {},
+        "samples": samples,
+        "settle": settle,
+        "monitor_started_before_gate": bool(args.metrics),
+        "sample_count": len(samples),
+    }
+    group_row["metrics_window"]["settle"] = settle
+    group_row["metrics_window"]["idle_after"] = group_row["idle_after"]
+    spec = group_row.get("speculative")
+    metrics_errors = []
+    if args.metrics:
+        if before_series is None:
+            metrics_errors.append(
+                "metrics_before_error:" + (metrics_error or "unavailable"))
+        if after_series is None:
+            metrics_errors.append("metrics_after_missing")
+        if before_series is not None and not settle.get("settled"):
+            metrics_errors.append("metrics_settle_not_confirmed")
+    strict_errors = []
+    if args.metrics and getattr(args, "spec_strict", True):
+        if spec is None:
+            strict_errors.append("spec:spec_counters_not_captured")
+        else:
+            strict_errors.extend("spec:" + error
+                                 for error in spec.get("errors", []))
+    if getattr(args, "require_exclusive", True):
+        strict_errors.extend("exclusive:" + error
+                             for error in exclusive_errors)
+    strict_errors.extend("metrics:" + error for error in metrics_errors)
     group_row["validation_errors"] = sorted({
-        error for row in rows for error in row.get("validation_errors", [])})
-    group_row["valid"] = (
+        error for row in rows for error in row.get("validation_errors", [])}
+        | set(strict_errors))
+    group_row["spec_validation_errors"] = (
+        spec.get("errors", []) if spec else ["spec_counters_not_captured"])
+    group_row["valid"] = bool(rows) and (
         all(row.get("valid") for row in rows)
         and (not args.require_engine_events
              or group_row["engine_events_all_present"])
+        and not strict_errors
     )
     return group_row, rows
 
@@ -1334,31 +1860,164 @@ def group_request_stats(rows) -> dict:
     return out
 
 
-async def sample_group_metrics(client, base_url: str, args,
-                               group_start: float, group_end: float):
-    if not args.metrics:
-        return None, None, []
-    try:
-        before = await fetch_metrics_async(client, base_url)
-    except Exception as exc:  # noqa: BLE001 - metrics are optional
-        return None, None, [{"error": f"{type(exc).__name__}: {exc}"}]
-    samples = []
-    stop_event = asyncio.Event()
-    monitor = asyncio.create_task(
-        metrics_monitor(client, base_url, args.metrics_interval,
-                        stop_event, samples))
-    await asyncio.sleep(min(args.metrics_interval, 0.05))
-    await asyncio.sleep(max(group_end - time.monotonic(), 0))
-    stop_event.set()
-    try:
-        await asyncio.wait_for(monitor, timeout=5.0)
-    except asyncio.TimeoutError:
-        monitor.cancel()
-    try:
-        after = await fetch_metrics_async(client, base_url)
-    except Exception:  # noqa: BLE001
-        after = before
-    return before, after, samples
+async def settle_spec_after_group(client, base_url: str, release_unix: float,
+                                  args, before_series: dict | None = None,
+                                  expected: dict | None = None,
+                                  out_dir=None, group_id: str = "") -> tuple[
+                                      dict | None, dict]:
+    """Poll until the group's exact counter deltas are visible twice.
+
+    Prometheus counters move on every engine step; ``*_created`` is a static
+    metric-object creation timestamp and is never used as a flush marker.
+    The first poll establishes the observed delta, the second consecutive
+    identical poll proves there is no late counter movement.  The timeout is
+    only a guard; a healthy group settles in well under a second.
+    """
+    start = time.monotonic()
+    timeout = float(getattr(args, "metrics_settle_timeout", 12.0))
+    poll = max(float(getattr(args, "metrics_settle_poll", 0.2)), 0.01)
+    deadline = start + timeout
+    polls = 0
+    last_error = None
+    last_series = None
+    previous_signature = None
+    stable_polls = 0
+    expected = expected or {}
+    expected_prompt = expected.get("prompt_tokens")
+    expected_generation = expected.get("generation_tokens")
+    expected_success = expected.get("request_success")
+    while True:
+        polls += 1
+        try:
+            series, text = await fetch_metrics_bundle_async(client, base_url)
+            last_series = series
+            prompt_delta = (
+                counter_total(series, "vllm:prompt_tokens_total")
+                - counter_total(before_series, "vllm:prompt_tokens_total")
+                if before_series else None)
+            generation_delta = (
+                counter_total(series, "vllm:generation_tokens_total")
+                - counter_total(
+                    before_series, "vllm:generation_tokens_total")
+                if before_series else None)
+            success_present = any(
+                key.startswith("vllm:request_success_total")
+                for key in series)
+            success_delta = (
+                counter_total(series, "vllm:request_success_total")
+                - counter_total(
+                    before_series, "vllm:request_success_total")
+                if before_series and success_present else None)
+            snap = spec_snapshot(series)
+            spec_deltas = spec_delta(
+                spec_snapshot(before_series) if before_series else {}, snap)
+            proposed = spec_deltas.get("proposed_tokens_delta")
+            accepted = spec_deltas.get("accepted_tokens_delta")
+            steps = spec_deltas.get("steps_delta")
+            current_signature = (
+                prompt_delta, generation_delta, success_delta,
+                steps, proposed, accepted,
+                tuple((spec_deltas.get(
+                    "accepted_per_position_delta") or {}).items()))
+            stable_polls = (
+                stable_polls + 1
+                if current_signature == previous_signature else 1)
+            previous_signature = current_signature
+            exact = (
+                (expected_prompt is None or prompt_delta == expected_prompt)
+                and (expected_generation is None
+                     or generation_delta == expected_generation)
+                and (expected_success is None
+                     or not success_present
+                     or success_delta == expected_success))
+            if exact and stable_polls >= 2:
+                dump_path = None
+                if out_dir is not None:
+                    dump_path = Path(out_dir) / "metrics" / (
+                        f"{safe_name(group_id)}.after.txt")
+                    dump_path.parent.mkdir(parents=True, exist_ok=True)
+                    dump_path.write_text(text)
+                return series, {
+                    "settled": True,
+                    "method": "exact_expected_deltas_stable_two_polls",
+                    "settle_polls": polls,
+                    "waited_ms": (time.monotonic() - start) * 1000.0,
+                    "polls": polls,
+                    "stable_polls": stable_polls,
+                    "expected": {
+                        "prompt_tokens": expected_prompt,
+                        "generation_tokens": expected_generation,
+                        "request_success": expected_success,
+                    },
+                    "observed": {
+                        "prompt_tokens": prompt_delta,
+                        "generation_tokens": generation_delta,
+                        "request_success": success_delta,
+                        "success_metric_present": success_present,
+                        "spec_steps": steps,
+                        "spec_proposed": proposed,
+                        "spec_accepted": accepted,
+                        "spec_accepted_per_position": spec_deltas.get(
+                            "accepted_per_position_delta"),
+                    },
+                    "created_gauge_value_ignored": snap.get("created_max"),
+                    "created_gauge_used_for_settle": False,
+                    "raw_after_path": str(dump_path) if dump_path else None,
+                    "timeout_s": timeout,
+                    "poll_s": poll,
+                    "last_error": last_error,
+                }
+        except Exception as exc:  # noqa: BLE001 - return bounded failure
+            last_error = f"{type(exc).__name__}: {exc}"
+        if time.monotonic() >= deadline:
+            snap = spec_snapshot(last_series) if last_series else {}
+            return last_series, {
+                "settled": False,
+                "method": "exact_expected_deltas_stable_two_polls",
+                "settle_polls": polls,
+                "waited_ms": (time.monotonic() - start) * 1000.0,
+                "polls": polls,
+                "stable_polls": stable_polls,
+                "expected": {
+                    "prompt_tokens": expected_prompt,
+                    "generation_tokens": expected_generation,
+                    "request_success": expected_success,
+                },
+                "observed": {
+                    "prompt_tokens": (
+                        counter_total(last_series, "vllm:prompt_tokens_total")
+                        - counter_total(
+                            before_series, "vllm:prompt_tokens_total")
+                        if last_series and before_series else None),
+                    "generation_tokens": (
+                        counter_total(
+                            last_series, "vllm:generation_tokens_total")
+                        - counter_total(
+                            before_series, "vllm:generation_tokens_total")
+                        if last_series and before_series else None),
+                    "spec_steps": (
+                        spec_delta(
+                            spec_snapshot(before_series), snap
+                        ).get("steps_delta")
+                        if last_series and before_series else None),
+                    "spec_proposed": (
+                        spec_delta(
+                            spec_snapshot(before_series), snap
+                        ).get("proposed_tokens_delta")
+                        if last_series and before_series else None),
+                    "spec_accepted": (
+                        spec_delta(
+                            spec_snapshot(before_series), snap
+                        ).get("accepted_tokens_delta")
+                        if last_series and before_series else None),
+                },
+                "created_gauge_value_ignored": snap.get("created_max"),
+                "created_gauge_used_for_settle": False,
+                "timeout_s": timeout,
+                "poll_s": poll,
+                "last_error": last_error,
+            }
+        await asyncio.sleep(poll)
 
 
 # ---------------------------------------------------------------------------
@@ -1371,6 +2030,10 @@ async def run_warmups(client, base_url: str, plan: dict, prompts: dict,
     rows = []
     for warmup in plan["warmups"]:
         await wait_idle_async(client, base_url, args.idle_timeout)
+        before_series = None
+        if args.metrics:
+            before_series, _ = await fetch_metrics_bundle_async(
+                client, base_url)
         prompt = prompts[(warmup["context_type"], warmup["shape"])]
         request_id = (
             f"cwb-{run_id}-{safe_name(warmup['group_id'])}-"
@@ -1392,10 +2055,26 @@ async def run_warmups(client, base_url: str, plan: dict, prompts: dict,
             "group_start_mono": time.monotonic(),
             "prompt_token_ids": prompt["prompt_token_ids"],
         }
+        release_unix = time.time()
         row = await stream_request(
             client, base_url, payload, meta, warmup["prompt_tokens"],
             warmup["completion_tokens"])
         await events.wait_for([request_id], min(args.engine_event_timeout, 5))
+        await wait_idle_async(client, base_url, args.idle_timeout)
+        warmup_settle = {"skipped": True}
+        if args.metrics:
+            _, warmup_settle = await settle_spec_after_group(
+                client, base_url, release_unix, args,
+                before_series=before_series,
+                expected={
+                    "prompt_tokens": warmup["prompt_tokens"],
+                    "generation_tokens": warmup["completion_tokens"],
+                    "request_success": 1,
+                })
+        row["settle"] = warmup_settle
+        if args.metrics and not warmup_settle.get("settled"):
+            row["validation_errors"].append("warmup_metrics_settle_timeout")
+            row["valid"] = False
         engine = normalize_engine_event(
             events.get("cmpl-" + request_id, request_id))
         row["engine_event_present"] = engine is not None
@@ -1553,11 +2232,18 @@ def refresh_group_rollups(rows: list, groups: list,
         errors = set(group.get("validation_errors") or [])
         for row in group_rows:
             errors.update(row.get("validation_errors") or [])
+        for error in (group.get("speculative") or {}).get("errors", []):
+            errors.add("spec:" + error)
+        if (group.get("exclusive") or {}).get("required"):
+            for error in (group.get("exclusive") or {}).get("errors", []):
+                errors.add("exclusive:" + error)
         group["validation_errors"] = sorted(errors)
         group["valid"] = bool(group_rows) and all(
             row.get("valid") for row in group_rows) and (
                 not require_engine_events
-                or group["engine_events_all_present"])
+                or group["engine_events_all_present"]) and not any(
+                    error.startswith(("spec:", "exclusive:", "metrics:"))
+                    for error in errors)
         if group.get("group_wall_s") is None:
             ends = [
                 row.get("end_rel_ms") for row in group_rows
@@ -1604,6 +2290,92 @@ def annotate_group_activity(rows: list, groups: list) -> None:
             group.get("engine_prefill_group_tokens_per_s"))
         if group.get("shape") == "prefill":
             group["group_decode_tokens_per_s"] = None
+
+
+def aggregate_spec_groups(groups: list, valid_only: bool = False) -> dict:
+    """Weighted counter aggregate; never a mean of per-group ratios.
+
+    Primary campaign aggregates pass ``valid_only=True`` so a group with a
+    foreign/reset/incomplete counter window cannot contaminate acceptance.
+    Diagnostics are always counted over every supplied group, and the raw
+    aggregate remains available separately.
+    """
+    all_present = [group for group in groups
+                   if isinstance(group.get("speculative"), dict)]
+    present = [group for group in all_present
+               if group.get("valid")] if valid_only else all_present
+    steps = sum(float(group["speculative"].get("steps_delta") or 0.0)
+                for group in present)
+    proposed = sum(
+        float(group["speculative"].get("proposed_tokens_delta") or 0.0)
+        for group in present)
+    accepted = sum(
+        float(group["speculative"].get("accepted_tokens_delta") or 0.0)
+        for group in present)
+    per_pos = {}
+    for group in present:
+        for position, value in (
+                group["speculative"].get(
+                    "accepted_per_position_delta") or {}).items():
+            per_pos[str(position)] = per_pos.get(str(position), 0.0) + float(
+                value)
+    per_pos = dict(sorted(per_pos.items(), key=lambda item: int(item[0])))
+    generation_delta = sum(
+        float((group.get("metrics") or {}).get(
+            "generation_tokens_total_delta") or 0.0)
+        for group in present)
+    invalid_groups = [group for group in all_present
+                      if not group.get("valid")]
+    return {
+        "groups": len(all_present),
+        "groups_included": len(present),
+        "groups_excluded_invalid": len(all_present) - len(present),
+        "invalid_group_ids": sorted(
+            str(group.get("group_id")) for group in invalid_groups),
+        "valid_only": valid_only,
+        "groups_with_counters": len(all_present),
+        "valid_groups": sum(1 for group in all_present
+                            if group.get("valid")),
+        "steps": steps,
+        "proposed_tokens": proposed,
+        "accepted_tokens": accepted,
+        "acceptance": accepted / proposed if proposed > 0 else None,
+        "acceptance_definition": "sum(accepted)/sum(proposed)",
+        "acceptance_null_reason": (
+            None if proposed > 0 else "no_proposed_tokens_in_scope"),
+        "accepted_per_position": per_pos,
+        "per_position_acceptance": {
+            position: (value / steps if steps > 0 else None)
+            for position, value in per_pos.items()},
+        "per_position_definition": "accepted_at_position/steps",
+        "emitted_per_step_theoretical": (
+            1.0 + accepted / steps if steps > 0 else None),
+        "generation_tokens_delta": generation_delta,
+        "emitted_per_step_actual": (
+            generation_delta / steps if steps > 0 else None),
+        "emitted_per_step_actual_caveat": (
+            "generation_tokens_total includes the first generated token and "
+            "final output-limit truncation."),
+        "groups_with_spec_errors": sum(
+            1 for group in all_present
+            if group.get("speculative", {}).get("errors")),
+        "counter_source": "per_group_idle_before_after_engine_metrics",
+    }
+
+
+def aggregate_spec_by(groups: list, fields: list,
+                      valid_only: bool = False) -> dict:
+    buckets = {}
+    for group in groups:
+        key = tuple(group.get(field) for field in fields)
+        buckets.setdefault(key, []).append(group)
+    return {
+        "|".join(str(part) for part in key): {
+            "key": dict(zip(fields, key)),
+            **aggregate_spec_groups(bucket, valid_only=valid_only),
+        }
+        for key, bucket in buckets.items()
+    }
 
 
 def aggregate_rows(rows, group_rows, key_fields, group_key_fields) -> dict:
@@ -1725,8 +2497,20 @@ def aggregate_rows(rows, group_rows, key_fields, group_key_fields) -> dict:
             stats_summary(active_values, "active_max", p95=False))
         entry["actual_overlap"].update(
             stats_summary(queued_values, "queued_max", p95=False))
+        entry["speculative_decode"] = aggregate_spec_groups(
+            [group for group in groups_here
+             if group.get("shape") == "decode"], valid_only=True)
+        entry["speculative_prefill"] = aggregate_spec_groups(
+            [group for group in groups_here
+             if group.get("shape") == "prefill"], valid_only=True)
+        if all(group.get("shape") == "decode" for group in groups_here):
+            entry["speculative"] = entry["speculative_decode"]
+        elif all(group.get("shape") == "prefill" for group in groups_here):
+            entry["speculative"] = entry["speculative_prefill"]
+        else:
+            entry["speculative"] = None
         entry["activity"] = {
-            "sampling": "post_group_only",
+            "sampling": "during_group_plus_idle_edges",
             "proves_active_overlap": False,
             "groups_total": len(groups_here),
             "groups_metrics_present": sum(
@@ -1739,9 +2523,15 @@ def aggregate_rows(rows, group_rows, key_fields, group_key_fields) -> dict:
             "groups_with_waiting": sum(
                 1 for value in waiting if value and value > 0),
             "caveat": (
-                "vllm:num_requests_running/waiting are sampled after the "
-                "group gate has ended; they are post-group samples, not "
-                "proof of active overlap inside the group."),
+                "vllm:num_requests_running/waiting are sampled during the "
+                "group window starting before gate release, plus idle "
+                "before/after snapshots. They show observed scheduler "
+                "activity but are gauges, not proof that C GPU kernels ran "
+                "at once."),
+            "monitor_started_before_gate_groups": sum(
+                1 for group in groups_here
+                if (group.get("metrics_window") or {}).get(
+                    "monitor_started_before_gate")),
         }
         out["|".join(str(part) for part in key)] = entry
     return out
@@ -2230,6 +3020,10 @@ def markdown_summary(summary: dict) -> str:
         "The engine-prefill columns are primary only for `shape=prefill` "
         "rows. Decode-shape prefill is secondary and is never pooled into "
         "that primary result.",
+        "- `TTFT p95`/`e2e p95` are per-request; the prefill and decode "
+        "tok/s med/peak columns are whole-request medians/peaks. Prefill "
+        "and decode shapes are never mixed. The `group decode tok/s` "
+        "column is the separate group-aggregate metric.",
         "",
         "## Shape x concurrency",
         "",
@@ -2252,6 +3046,95 @@ def markdown_summary(summary: dict) -> str:
             f"{fmt(entry.get('group_prefill_tokens_per_s_median'))} | "
             f"{fmt(entry.get('group_decode_tokens_per_s_median'))} | "
             f"{fmt(entry.get('group_completion_tokens_per_s_median'))} |")
+    spec = summary.get("speculative") or {}
+    weighted = spec.get("weighted_decode") or {}
+    lines += [
+        "",
+        "## DSpark speculative decode acceptance",
+        "",
+        "Acceptance is the weighted engine-counter ratio "
+        "`sum(accepted_tokens)/sum(proposed_tokens)`, never a mean of "
+        "per-group ratios. Primary aggregates include only groups whose "
+        "counter window, IDs, and per-position counters validated. "
+        "`steps` is `spec_decode_num_drafts_total`.",
+        "",
+        f"- weighted decode: accepted={fmt(weighted.get('accepted_tokens'), digits=0)}"
+        f" proposed={fmt(weighted.get('proposed_tokens'), digits=0)}"
+        f" steps={fmt(weighted.get('steps'), digits=0)}"
+        f" acceptance={fmt(weighted.get('acceptance'), digits=4)}"
+        f" emitted/step theoretical="
+        f"{fmt(weighted.get('emitted_per_step_theoretical'), digits=4)}"
+        f" actual={fmt(weighted.get('emitted_per_step_actual'), digits=4)}",
+        f"- prefill counters are reported separately, never pooled: "
+        f"proposed={fmt((spec.get('prefill_raw') or {}).get('proposed_tokens'), digits=0)}"
+        f" acceptance="
+        f"{fmt((spec.get('prefill_raw') or {}).get('acceptance'), digits=4)}"
+        " (null when no draft tokens were proposed)",
+        f"- invalid-window exclusion: included="
+        f"{weighted.get('groups_included')}/{weighted.get('groups')}"
+        f" excluded={weighted.get('groups_excluded_invalid')}"
+        f" ids={weighted.get('invalid_group_ids') or []}; raw all-group "
+        f"accepted={fmt((spec.get('raw_decode_all_groups') or {}).get('accepted_tokens'), digits=0)}"
+        f" proposed={fmt((spec.get('raw_decode_all_groups') or {}).get('proposed_tokens'), digits=0)}"
+        " is diagnostic only",
+        "",
+        "| type | C | groups | steps | proposed | accepted | acceptance | "
+        "pos0 | pos1 | pos2 | pos3 | pos4 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for key, entry in sorted(
+            (spec.get("by_type_concurrency") or {}).items(),
+            key=lambda item: (item[1]["key"].get("context_type", ""),
+                              item[1]["key"].get("concurrency", 0))):
+        positions = entry.get("per_position_acceptance") or {}
+        lines.append(
+            f"| {entry['key'].get('context_type')} | "
+            f"{entry['key'].get('concurrency')} | {entry.get('groups')} | "
+            f"{fmt(entry.get('steps'), digits=0)} | "
+            f"{fmt(entry.get('proposed_tokens'), digits=0)} | "
+            f"{fmt(entry.get('accepted_tokens'), digits=0)} | "
+            f"{fmt(entry.get('acceptance'), digits=4)} | "
+            + " | ".join(
+                fmt(positions.get(str(index)), digits=3)
+                for index in range(5)) + " |")
+    lines += [
+        "",
+        "Per-position values are unconditional acceptance "
+        "`accepted_at_position/steps`. `emitted/step actual` is the "
+        "generation-token counter per step and includes the first generated "
+        "token and final output-limit truncation; it is not a pure decode "
+        "rate.",
+        "",
+        "## Counter settle proof",
+        "",
+        "Each group starts its monitor before gate release, reaches engine "
+        "idle, then polls `/metrics` until the exact expected prompt, "
+        "generation, and request-success deltas are observed twice in a row. "
+        "`*_created` gauges are static object timestamps and are never used.",
+        "",
+        "| shape | C | groups | settled | max polls | max wait ms |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    settle_groups = {}
+    for group in summary.get("groups", []):
+        settle = (group.get("metrics_window") or {}).get("settle") or {}
+        if not settle:
+            continue
+        key = (group.get("shape"), group.get("concurrency"))
+        entry = settle_groups.setdefault(key, {"groups": 0, "settled": 0,
+                                               "max_polls": 0,
+                                               "max_wait_ms": 0.0})
+        entry["groups"] += 1
+        entry["settled"] += int(bool(settle.get("settled")))
+        entry["max_polls"] = max(
+            entry["max_polls"], int(settle.get("polls") or 0))
+        entry["max_wait_ms"] = max(
+            entry["max_wait_ms"], float(settle.get("waited_ms") or 0.0))
+    for (shape, concurrency), entry in sorted(settle_groups.items()):
+        lines.append(
+            f"| {shape} | {concurrency} | {entry['groups']} | "
+            f"{entry['settled']} | {entry['max_polls']} | "
+            f"{fmt(entry['max_wait_ms'], digits=0)} |")
     lines += [
         "",
         "## Actual engine interval overlap",
@@ -2387,6 +3270,10 @@ def summarize(run_meta: dict, plan: dict, rows: list, warmup_rows: list,
     decode_shape_prefill_rates = [
         row.get("engine_prefill_tokens_per_s") for row in decode_rows
         if row.get("engine_prefill_tokens_per_s") is not None]
+    spec_decode_groups = [
+        group for group in groups if group.get("shape") == "decode"]
+    spec_prefill_groups = [
+        group for group in groups if group.get("shape") == "prefill"]
     c8_decode_groups = [
         group for group in groups
         if group.get("shape") == "decode"
@@ -2417,7 +3304,7 @@ def summarize(run_meta: dict, plan: dict, rows: list, warmup_rows: list,
         "model": run_meta["model"],
         "endpoint": "/v1/completions",
         "wall_s": run_meta["wall_s"],
-        "fixture_digest": fixture_digest(),
+        "fixtures_digest": fixtures_digest(),
         "plan": plan,
         "totals": {
             "measured_groups": len(groups),
@@ -2506,6 +3393,39 @@ def summarize(run_meta: dict, plan: dict, rows: list, warmup_rows: list,
             "groups_with_snapshot": sum(
                 1 for group in groups if group.get("metrics") is not None),
         },
+        "speculative": {
+            "k": getattr(args, "spec_k", DEFAULT_SPEC_K),
+            "strict": bool(getattr(args, "spec_strict", True)),
+            "primary_shape": "decode",
+            "definitions": SPEC_METRIC_DEFINITIONS,
+            "acceptance_definition": "sum(accepted)/sum(proposed)",
+            "weighted_decode": aggregate_spec_groups(
+                spec_decode_groups, valid_only=True),
+            "weighted_decode_valid_only": aggregate_spec_groups(
+                spec_decode_groups, valid_only=True),
+            "raw_decode_all_groups": aggregate_spec_groups(
+                spec_decode_groups),
+            "prefill_raw": aggregate_spec_groups(
+                spec_prefill_groups, valid_only=True),
+            "raw_prefill_all_groups": aggregate_spec_groups(
+                spec_prefill_groups),
+            "by_type": aggregate_spec_by(
+                spec_decode_groups, ["context_type"], valid_only=True),
+            "by_concurrency": aggregate_spec_by(
+                spec_decode_groups, ["concurrency"], valid_only=True),
+            "by_type_concurrency": aggregate_spec_by(
+                spec_decode_groups, ["context_type", "concurrency"],
+                valid_only=True),
+            "by_type_shape_concurrency": aggregate_spec_by(
+                groups, ["context_type", "shape", "concurrency"],
+                valid_only=True),
+            "prefill_by_type_shape_concurrency": aggregate_spec_by(
+                spec_prefill_groups,
+                ["context_type", "shape", "concurrency"], valid_only=True),
+            "pooling": (
+                "Prefill and decode counters are never pooled; acceptance "
+                "is null for prefill when proposed=0."),
+        },
         "actual_overlap": {
             "source": "engine_finished_request_events",
             "active_interval": (
@@ -2552,9 +3472,18 @@ def summarize(run_meta: dict, plan: dict, rows: list, warmup_rows: list,
             "require_engine_events": bool(args.require_engine_events),
             "all_measured_valid": len(valid_rows) == len(measured_rows),
             "all_groups_valid": len(group_ok) == len(groups),
+            "unique_request_ids": (
+                len({
+                    row.get("request_id") for row in measured_rows
+                    if row.get("request_id")})
+                == len(measured_rows)),
+            "invalid_group_ids": [
+                group.get("group_id") for group in groups
+                if not group.get("valid")],
             "exit_nonzero": bool(
                 args.strict and (
                     len(valid_rows) != len(measured_rows)
+                    or len(group_ok) != len(groups)
                     or (args.require_engine_events and not request_scoped))),
         },
     }
@@ -2580,7 +3509,7 @@ async def run_live_async(args) -> int:
 
     plan = build_plan(args.types, args.shapes, args.concurrency,
                       args.repeats, args.warmup)
-    write_json(out_dir / "plan.json", plan)
+
 
     health = await asyncio.to_thread(health_check, base, args.model)
     limits = http_limits(httpx, max(args.concurrency))
@@ -2642,30 +3571,64 @@ async def run_live_async(args) -> int:
 
         tokenizer = Tokenizer(base, args.model, timeout=args.tokenizer_timeout)
         print("building exact prompts with served /tokenize ...")
-        prompts = build_prompt_set(tokenizer, args.types)
+        if args.self_smoke:
+            prompts = build_smoke_prompts(tokenizer, args.types)
+        else:
+            prompts = build_distinct_prompts(tokenizer, args.types)
+        invalid_prompts = {
+            f"{ctype}/{shape}": prompt.get("invalid_reasons")
+            for (ctype, shape), prompt in prompts.items()
+            if not prompt.get("valid")}
+        if invalid_prompts:
+            write_json(out_dir / "prompts.json", {
+                "schema": "cwb-prompts-v2",
+                "valid": False,
+                "invalid": invalid_prompts,
+                "prompts": list(prompts.values()),
+            })
+            raise SystemExit(
+                f"prompt validation failed before any request: "
+                f"{invalid_prompts}")
+        for entry in plan["groups"] + plan["warmups"]:
+            prompt = prompts[(entry["context_type"], entry["shape"])]
+            if entry["prompt_tokens"] != prompt["target_prompt_tokens"]:
+                raise SystemExit(
+                    "plan prompt length does not match built prompt for "
+                    f"{entry['group_id']}")
+            entry.update({
+                "fixture_id": prompt["fixture_id"],
+                "prompt_key": (
+                    f"{entry['context_type']}/{entry['shape']}"),
+                "prompt_sha256": prompt["prompt_sha256"],
+                "prompt_token_ids_sha256": prompt["token_id_sha256"],
+                "prompt_chars": prompt["prompt_chars"],
+                "prompt_valid": prompt["valid"],
+            })
+        write_json(out_dir / "plan.json", plan)
         write_json(out_dir / "prompts.json", {
-            "schema": "cwb-prompts-v1",
+            "schema": "cwb-prompts-v2",
             "created_at": now_iso(),
+            "valid": all(prompt["valid"] for prompt in prompts.values()),
+            "fixtures_digest": fixtures_digest(),
+            "prompt_definitions": distinct_prompt_definitions(),
             "tokenizer_calls": tokenizer.calls,
             "prompts": [
                 {key: value for key, value in prompt.items()
                  if key != "prompt_token_ids"}
                 for prompt in prompts.values()
             ],
-            "prompt_token_ids_sha256": {
-                f"{prompt['context_type']}/{prompt['shape']}": sha256_text(
-                    json.dumps(prompt["prompt_token_ids"],
-                               separators=(",", ":")))
-                for prompt in prompts.values()
-            },
         })
         # Exact token IDs are kept separately so the prompt JSON stays small.
         with (out_dir / "prompt_token_ids.jsonl").open("w") as handle:
             for prompt in prompts.values():
                 handle.write(json.dumps({
                     "context_type": prompt["context_type"],
+                    "fixture_id": prompt["fixture_id"],
                     "shape": prompt["shape"],
                     "target_prompt_tokens": prompt["target_prompt_tokens"],
+                    "prompt_sha256": prompt["prompt_sha256"],
+                    "prompt_token_ids_sha256": prompt["token_id_sha256"],
+                    "validation": prompt["validation"],
                     "token_ids": prompt["prompt_token_ids"],
                 }, separators=(",", ":")) + "\n")
 
@@ -2676,6 +3639,10 @@ async def run_live_async(args) -> int:
             "label": args.label,
             "base_url": base,
             "model": args.model,
+            "endpoint": "/v1/completions",
+            "continuation_mode": "raw_completion_no_chat_template",
+            "forced_performance_not_quality": True,
+            "fixtures_digest": fixtures_digest(),
             "started_at": now_iso(),
             "started_unix_s": run_start_unix,
             "health": health,
@@ -2774,7 +3741,7 @@ async def run_live_async(args) -> int:
         write_json(out_dir / "phases.json", {
             "schema": "cwb-phases-v1", "phases": phases})
         write_json(out_dir / "gpu_headroom.json", gpu)
-        if args.metrics_raw:
+        if getattr(args, "metrics_raw", False):
             write_json(out_dir / "final_metrics.json", {
                 "created_at": now_iso(),
                 "selected": selected_metrics(final_series),
@@ -2811,6 +3778,8 @@ async def run_live_async(args) -> int:
 # ---------------------------------------------------------------------------
 
 class SmokeState:
+    """Fake engine counters, including delayed Prometheus publication."""
+
     def __init__(self):
         self.lock = threading.Lock()
         self.active = 0
@@ -2819,6 +3788,54 @@ class SmokeState:
         self.finishes = []
         self.event_path = None
         self.errors = []
+        self.created = time.time() - 3600.0
+        self.counters = {
+            "prompt_tokens": 0,
+            "generation_tokens": 0,
+            "request_success": 0,
+            "steps": 0,
+            "proposed": 0,
+            "accepted": 0,
+            "per_position": [0] * DEFAULT_SPEC_K,
+        }
+        self.pending = []
+        self.published_at = []
+
+    def record(self, *, prompt_tokens: int, generation_tokens: int,
+               request_success: int = 1, steps: int = 0,
+               proposed: int = 0, accepted: int = 0,
+               per_position: list | None = None,
+               delay_s: float = 0.30) -> None:
+        increments = {
+            "prompt_tokens": prompt_tokens,
+            "generation_tokens": generation_tokens,
+            "request_success": request_success,
+            "steps": steps,
+            "proposed": proposed,
+            "accepted": accepted,
+            "per_position": list(per_position or [0] * DEFAULT_SPEC_K),
+        }
+        with self.lock:
+            self.pending.append((time.monotonic() + max(delay_s, 0.0),
+                                 increments))
+
+    def flush(self) -> None:
+        now = time.monotonic()
+        with self.lock:
+            due = [item for item in self.pending if item[0] <= now]
+            self.pending = [item for item in self.pending if item[0] > now]
+            for _, increments in due:
+                self.counters["prompt_tokens"] += increments["prompt_tokens"]
+                self.counters["generation_tokens"] += (
+                    increments["generation_tokens"])
+                self.counters["request_success"] += (
+                    increments["request_success"])
+                self.counters["steps"] += increments["steps"]
+                self.counters["proposed"] += increments["proposed"]
+                self.counters["accepted"] += increments["accepted"]
+                for index, value in enumerate(increments["per_position"]):
+                    self.counters["per_position"][index] += int(value)
+                self.published_at.append(now)
 
 
 def make_smoke_handler(state: SmokeState, delay: float):
@@ -2851,25 +3868,35 @@ def make_smoke_handler(state: SmokeState, delay: float):
                     "id": MODEL, "object": "model", "owned_by": "smoke",
                     "max_model_len": 1048576}]})
             elif path == "/metrics":
-                body = "\n".join([
+                state.flush()
+                with state.lock:
+                    counters = {
+                        key: (list(value) if isinstance(value, list) else value)
+                        for key, value in state.counters.items()}
+                    active = state.active
+                    created = state.created
+                lines = [
                     "# smoke metrics",
-                    'vllm:num_requests_running{engine="0",model_name="'
-                    + MODEL + '"} 0.0',
-                    'vllm:num_requests_waiting{engine="0",model_name="'
-                    + MODEL + '"} 0.0',
-                    'vllm:kv_cache_usage_perc{engine="0",model_name="'
-                    + MODEL + '"} 0.0',
+                    f'vllm:num_requests_running'
+                    f'{{engine="0",model_name="{MODEL}"}} {float(active)}',
+                    f'vllm:num_requests_waiting{{engine="0",model_name="{MODEL}"}} 0.0',
+                    f'vllm:kv_cache_usage_perc{{engine="0",model_name="{MODEL}"}} 0.0',
                     'vllm:cache_config_info{block_size="128",'
-                    'num_gpu_blocks="5237",kv_cache_size_tokens="20227",'
+                    'num_gpu_blocks="18320",kv_cache_size_tokens="2073385",'
                     'enable_prefix_caching="False",'
                     'cache_dtype="nvfp4_ds_mla",'
                     'gpu_memory_utilization="0.97",'
-                    'kv_cache_memory_bytes="None"} 1.0',
+                    'kv_cache_memory_bytes="2147483648"} 1.0',
                     'vllm:num_preemptions_total{engine="0"} 0.0',
                     'vllm:prefix_cache_hits_total{engine="0"} 0.0',
                     'vllm:prompt_tokens_cached_total{engine="0"} 0.0',
-                    'vllm:prompt_tokens_total{engine="0"} 0.0',
-                    'vllm:generation_tokens_total{engine="0"} 0.0',
+                    f'vllm:prompt_tokens_total{{engine="0"}} '
+                    f'{float(counters["prompt_tokens"])}',
+                    f'vllm:generation_tokens_total{{engine="0"}} '
+                    f'{float(counters["generation_tokens"])}',
+                    'vllm:request_success_total'
+                    f'{{engine="0",finished_reason="length"}} '
+                    f'{float(counters["request_success"])}',
                     'vllm:request_prefill_time_seconds_sum{engine="0"} 0.0',
                     'vllm:request_prefill_time_seconds_count{engine="0"} 0.0',
                     'vllm:request_prefill_kv_computed_tokens_sum'
@@ -2880,8 +3907,31 @@ def make_smoke_handler(state: SmokeState, delay: float):
                     'vllm:request_decode_time_seconds_count{engine="0"} 0.0',
                     'vllm:request_queue_time_seconds_sum{engine="0"} 0.0',
                     'vllm:request_queue_time_seconds_count{engine="0"} 0.0',
-                    "",
-                ]).encode("utf-8")
+                    f'vllm:spec_decode_num_drafts_total{{engine="0"}} '
+                    f'{float(counters["steps"])}',
+                    'vllm:spec_decode_num_draft_tokens_total{engine="0"} '
+                    f'{float(counters["proposed"])}',
+                    'vllm:spec_decode_num_accepted_tokens_total{engine="0"} '
+                    f'{float(counters["accepted"])}',
+                    'vllm:spec_decode_num_drafts_created{engine="0"} '
+                    f'{float(created)}',
+                    'vllm:spec_decode_num_draft_tokens_created{engine="0"} '
+                    f'{float(created)}',
+                    'vllm:spec_decode_num_accepted_tokens_created{engine="0"} '
+                    f'{float(created)}',
+                ]
+                lines.extend(
+                    'vllm:spec_decode_num_accepted_tokens_per_pos_total'
+                    f'{{engine="0",position="{index}"}} '
+                    f'{float(value)}'
+                    for index, value in enumerate(
+                        counters["per_position"]))
+                lines.extend(
+                    'vllm:spec_decode_num_accepted_tokens_per_pos_created'
+                    f'{{engine="0",position="{index}"}} {float(created)}'
+                    for index in range(DEFAULT_SPEC_K))
+                lines.append("")
+                body = "\n".join(lines).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
                 self.send_header("Content-Length", str(len(body)))
@@ -2979,6 +4029,20 @@ def make_smoke_handler(state: SmokeState, delay: float):
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 finished = time.monotonic()
+                steps = max(max_tokens - 1, 0)
+                accepted = steps
+                base, remainder = divmod(accepted, DEFAULT_SPEC_K)
+                per_position = [base] * DEFAULT_SPEC_K
+                for index in range(remainder):
+                    per_position[index] += 1
+                state.record(
+                    prompt_tokens=len(prompt_ids),
+                    generation_tokens=max_tokens,
+                    steps=steps,
+                    proposed=DEFAULT_SPEC_K * steps,
+                    accepted=accepted,
+                    per_position=per_position,
+                    delay_s=0.30)
                 event = {
                     "schema": ENGINE_EVENT_SCHEMA,
                     "event": "finished",
@@ -3024,6 +4088,54 @@ def make_smoke_handler(state: SmokeState, delay: float):
 
 def assert_smoke(summary: dict, state: SmokeState, groups: list) -> list:
     problems = []
+    zero = speculative_summary(
+        "decode",
+        {"steps_delta": 10, "proposed_tokens_delta": 50,
+         "accepted_tokens_delta": 0,
+         "accepted_per_position_delta": {str(index): 0
+                                         for index in range(5)},
+         "counter_present": True},
+        generation_tokens_delta=10, spec_k=5, strict=True)
+    if zero["acceptance"] != 0.0:
+        problems.append(
+            f"zero-accepted decode acceptance {zero['acceptance']!r} != 0.0")
+    if zero["errors"]:
+        problems.append(
+            f"zero-accepted decode rejected: {zero['errors']}")
+    good = {
+        "group_id": "reg-good", "valid": True, "context_type": "prose",
+        "shape": "decode", "concurrency": 1,
+        "metrics": {"generation_tokens_total_delta": 30},
+        "speculative": {
+            "steps_delta": 10, "proposed_tokens_delta": 50,
+            "accepted_tokens_delta": 20,
+            "accepted_per_position_delta": {"0": 20}}}
+    bad = {
+        "group_id": "reg-bad", "valid": False, "context_type": "prose",
+        "shape": "decode", "concurrency": 1,
+        "metrics": {"generation_tokens_total_delta": 600},
+        "speculative": {
+            "steps_delta": 200, "proposed_tokens_delta": 1000,
+            "accepted_tokens_delta": 999,
+            "accepted_per_position_delta": {"0": 999}}}
+    primary = aggregate_spec_groups([good, bad], valid_only=True)
+    raw = aggregate_spec_groups([good, bad])
+    if (primary["accepted_tokens"], primary["proposed_tokens"],
+            primary["steps"], primary["acceptance"]) != (20.0, 50.0, 10.0,
+                                                         0.4):
+        problems.append(f"valid-only aggregate contaminated: {primary}")
+    if (primary["groups"], primary["groups_included"],
+            primary["groups_excluded_invalid"],
+            primary["invalid_group_ids"]) != (2, 1, 1, ["reg-bad"]):
+        problems.append(f"valid-only diagnostics wrong: {primary}")
+    if (raw["accepted_tokens"], raw["proposed_tokens"],
+            raw["groups_excluded_invalid"],
+            raw["invalid_group_ids"]) != (1019.0, 1050.0, 0, ["reg-bad"]):
+        problems.append(f"raw aggregate diagnostics wrong: {raw}")
+    by_type = aggregate_spec_by(
+        [good, bad], ["context_type"], valid_only=True)["prose"]
+    if by_type["accepted_tokens"] != 20.0:
+        problems.append(f"by-type valid-only aggregate contaminated: {by_type}")
     totals = summary["totals"]
     if totals["measured_groups"] != 4:
         problems.append(
@@ -3119,6 +4231,108 @@ def assert_smoke(summary: dict, state: SmokeState, groups: list) -> list:
     cache_formula = summary.get("cache_capacity", {}).get("formula") or {}
     if any("3gib" in key for key in cache_formula):
         problems.append("stale nominal 3GiB cache fields in summary")
+    spec = summary.get("speculative") or {}
+    decode_groups = [
+        group for group in groups if group.get("shape") == "decode"]
+    prefill_groups = [
+        group for group in groups if group.get("shape") == "prefill"]
+    if len(decode_groups) != 2 or len(prefill_groups) != 2:
+        problems.append(
+            "expected 2 decode + 2 prefill groups, got "
+            f"{len(decode_groups)}+{len(prefill_groups)}")
+    for group in groups:
+        window = group.get("metrics_window") or {}
+        settle = window.get("settle") or {}
+        if not settle.get("settled"):
+            problems.append(f"{group['group_id']}: settle did not complete")
+            continue
+        if settle.get("created_gauge_used_for_settle") is not False:
+            problems.append(
+                f"{group['group_id']}: created gauge used for settle")
+        if int(settle.get("stable_polls") or 0) < 2:
+            problems.append(
+                f"{group['group_id']}: settle lacked two stable polls")
+        if float(settle.get("waited_ms") or 0.0) < 150.0:
+            problems.append(
+                f"{group['group_id']}: settle did not wait for delayed "
+                f"counter flush ({settle.get('waited_ms')}ms)")
+        concurrency = group["concurrency"]
+        expected_prompt = concurrency * group["prompt_tokens"]
+        expected_generation = concurrency * group["completion_tokens"]
+        observed = settle.get("observed") or {}
+        if observed.get("prompt_tokens") != expected_prompt:
+            problems.append(
+                f"{group['group_id']}: prompt delta "
+                f"{observed.get('prompt_tokens')} != {expected_prompt}")
+        if observed.get("generation_tokens") != expected_generation:
+            problems.append(
+                f"{group['group_id']}: generation delta "
+                f"{observed.get('generation_tokens')} != {expected_generation}")
+        if observed.get("request_success") != concurrency:
+            problems.append(
+                f"{group['group_id']}: success delta "
+                f"{observed.get('request_success')} != {concurrency}")
+        for key in ("raw_before_path", "raw_after_path"):
+            raw_path = settle.get(key)
+            if not raw_path or not Path(raw_path).exists():
+                problems.append(
+                    f"{group['group_id']}: missing {key}")
+        if group.get("shape") == "decode":
+            expected_steps = concurrency * (group["completion_tokens"] - 1)
+            if observed.get("spec_steps") != expected_steps:
+                problems.append(
+                    f"{group['group_id']}: fake steps "
+                    f"{observed.get('spec_steps')} != {expected_steps}")
+            if observed.get("spec_proposed") != 5 * expected_steps:
+                problems.append(
+                    f"{group['group_id']}: fake proposed mismatch")
+            if observed.get("spec_accepted") != expected_steps:
+                problems.append(
+                    f"{group['group_id']}: fake accepted mismatch")
+        elif (observed.get("spec_steps") or observed.get("spec_proposed")
+              or observed.get("spec_accepted")):
+            problems.append(
+                f"{group['group_id']}: prefill fake spec counters nonzero")
+        if group.get("spec_validation_errors"):
+            problems.append(
+                f"{group['group_id']}: spec errors "
+                f"{group['spec_validation_errors']}")
+    weighted = spec.get("weighted_decode") or {}
+    if weighted.get("accepted_tokens") != 3 * 2047:
+        problems.append(
+            f"weighted accepted {weighted.get('accepted_tokens')} != 6141")
+    if weighted.get("proposed_tokens") != 3 * 5 * 2047:
+        problems.append(
+            f"weighted proposed {weighted.get('proposed_tokens')} != 30705")
+    if abs(float(weighted.get("acceptance") or 0.0) - 0.2) > 1e-9:
+        problems.append(
+            f"weighted acceptance {weighted.get('acceptance')} != 0.2")
+    positions = weighted.get("accepted_per_position") or {}
+    if set(positions) != {str(index) for index in range(5)}:
+        problems.append(f"missing per-position counters: {sorted(positions)}")
+    prefill_raw = spec.get("prefill_raw") or {}
+    if prefill_raw.get("acceptance") is not None:
+        problems.append("prefill acceptance must be null")
+    if (prefill_raw.get("proposed_tokens") or 0) != 0:
+        problems.append("prefill proposed tokens must be zero")
+    raw_paths = [
+        ((group.get("metrics_window") or {}).get("settle") or {}).get(
+            "raw_before_path")
+        for group in groups]
+    if all(raw_paths):
+        out_dir = Path(raw_paths[0]).parent.parent
+        plan = json.loads((out_dir / "plan.json").read_text())
+        for entry in plan["groups"] + plan["warmups"]:
+            if not entry.get("prompt_valid") or not entry.get(
+                    "prompt_sha256"):
+                problems.append(
+                    f"{entry['group_id']}: prompt evidence missing from plan")
+                break
+        prompts_json = json.loads((out_dir / "prompts.json").read_text())
+        if not prompts_json.get("valid"):
+            problems.append("prompts.json is not valid")
+        if not prompts_json.get("prompts"):
+            problems.append("prompts.json has no prompts")
     return problems
 
 
@@ -3154,7 +4368,6 @@ def run_self_smoke(base_args) -> int:
     args.cache_capacity_json = None
     args.metrics = True
     args.metrics_interval = 0.02
-    args.metrics_raw = False
     args.timeline = True
     args.strict = True
     args.require_engine_events = True
@@ -3445,8 +4658,9 @@ def parse_args(argv=None):
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--out", default="eval-out/concurrency_workload")
     parser.add_argument("--label", default="concurrency")
-    parser.add_argument("--types", default="code,prose,json,toolagent",
-                        help="comma list: code,prose,json,toolagent")
+    parser.add_argument(
+        "--types", default=",".join(CONTEXT_TYPES),
+        help="comma list: " + ",".join(CONTEXT_TYPES))
     parser.add_argument("--shapes", default="prefill,decode",
                         type=parse_shape_list)
     parser.add_argument("--concurrency", default="1,2,4,8",
@@ -3475,7 +4689,22 @@ def parse_args(argv=None):
                         default=True)
     parser.add_argument("--no-metrics", dest="metrics", action="store_false")
     parser.add_argument("--metrics-interval", default=0.2, type=float)
-    parser.add_argument("--metrics-raw", action="store_true")
+    parser.add_argument("--metrics-settle-timeout", default=12.0, type=float,
+                        help="guard seconds for exact counter settle")
+    parser.add_argument("--metrics-settle-poll", default=0.2, type=float)
+    parser.add_argument("--spec-k", default=DEFAULT_SPEC_K, type=int,
+                        help="expected proposals per engine step; 0 disables "
+                             "only the K equality check")
+    parser.add_argument("--spec-strict", dest="spec_strict",
+                        action="store_true", default=True)
+    parser.add_argument("--no-spec-strict", dest="spec_strict",
+                        action="store_false")
+    parser.add_argument("--require-exclusive", dest="require_exclusive",
+                        action="store_true", default=True,
+                        help="require exact counter/event deltas proving no "
+                             "other client shared the runtime window")
+    parser.add_argument("--no-require-exclusive", dest="require_exclusive",
+                        action="store_false")
     parser.add_argument("--timeline", dest="timeline", action="store_true",
                         default=True)
     parser.add_argument("--no-timeline", dest="timeline", action="store_false")
@@ -3505,6 +4734,18 @@ def parse_args(argv=None):
                         help="run a fake HTTP engine and verify the harness")
     parser.add_argument("--smoke-delay", default=0.01, type=float)
     args = parser.parse_args(argv)
+    if args.self_smoke:
+        args.spec_k = DEFAULT_SPEC_K
+        args.spec_strict = True
+        args.require_exclusive = True
+        args.metrics_settle_timeout = 5.0
+        args.metrics_settle_poll = 0.05
+    if args.metrics_settle_timeout <= 0:
+        parser.error("--metrics-settle-timeout must be > 0")
+    if args.metrics_settle_poll <= 0:
+        parser.error("--metrics-settle-poll must be > 0")
+    if args.spec_k < 0:
+        parser.error("--spec-k must be >= 0")
     args.types = normalize_types(args.types.split(","))
     if args.repeats < 1:
         parser.error("--repeats must be >= 1")

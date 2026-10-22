@@ -53,6 +53,24 @@ greedy + 8 sampled, twice per configuration) are k0 **15/16, 15/16**, k3
 **15/16, 15/16**, k5 **15/16, 14/16**, sampled **8/8** throughout; there is no
 formal quality or lossless claim. W8 is this round's ledger.
 
+**Current concurrency round (2026-10-22, distinct fixtures; complete; W10):**
+four authored, exactly tokenized tasks (prose, structured, code, reasoning)
+served **64/64 groups and 240/240 measured requests** at C1/2/4/8 on one boot
+with the retained k5 and an explicit 2 GiB KV pool, plus 32 excluded warmups,
+zero invalid rows and zero preemptions. Overall per-request decode median was
+**88.27 tok/s at C1** and **22.05 at C8**; the best per-type C1 median was
+**111.18 tok/s** (code, single-request peak **119.78**). The **163.09 tok/s C8**
+figure is an eight-request group aggregate, not a single-stream result, so the
+**120 tok/s per-request target remains unmet**. Group prefill was flat
+(**2,679.00 → 2,716.73 tok/s, +1.4%**). Weighted decode acceptance was
+**0.5085** (176,466 accepted / 347,020 proposed over 69,404 steps); prefill
+acceptance is N/A because no draft tokens were proposed. Prefill residency is
+only 2 concurrent prefills at C4/C8 because one 2048-token prompt fills
+`MAX_NUM_BATCHED_TOKENS=2048`, so those cells queue. GPU0 free floor was
+**572 MiB**; no 3 GiB fit and no 1M-token request are claimed. W10 is the
+current ledger; **W9 is the earlier reusable-fixture campaign, retained as
+historical and not directly comparable.**
+
 **DSpark k5 RG6 arm: REJECT (2026-10-22).** The paired same-condition
 comparison showed no benefit: short **76.31 RG6 vs 76.10 per-layer** tok/s,
 long **98.81 vs 97.38**, with paired median deltas **+0.67 [-2.65, +5.15]** and
@@ -898,11 +916,19 @@ fixtures SHA256 `2433c0eb06cf766301979895ab6599f580162518bb18a834982710cee377179
 (earlier k0/k3 fixtures `b06dc480...`). Raw rounds:
 the eval results directory. Full per-type/quality tables: the DSpark final-results artifact.
 
-### W9. Concurrency and 2 GiB KV-capacity campaign (2026-10-22; complete)
+### W9. Earlier concurrency campaign (old reusable fixtures, 2026-10-22; historical)
 
-**Validity.** All **64/64 groups, 240/240 measured requests and 32/32 warmup
-requests** validated; `invalid_requests=0`, `validation.all_groups_valid=true`
-and the run exited zero under `--strict --require-engine-events`. The run saw
+**Historical evidence, not current results.** This campaign used reusable
+code/prose/JSON/tool-agent prompts and the older type labels. Its counts,
+tables and figures are preserved exactly, but they are **not directly
+comparable** to the W10 distinct-fixture campaign and do not describe the
+current taxonomy. Its **135.0 tok/s** single-request peak is a historical
+observation for the old tool-agent fixture, not a current hardware ceiling.
+
+**Validity.** All **64/64 groups and 240/240 measured requests** validated; the
+**32 warmup requests were excluded with zero warmup invalids**.
+`invalid_requests=0`, `validation.all_groups_valid=true`, and the run exited zero
+under `--strict --require-engine-events`. The run saw
 272 event lines with zero bad lines and joined 240/240 rows by unique request
 suffix (zero base mismatches, token-count mismatches or non-monotone
 timestamps). Every row's request-scoped timestamps are monotone
@@ -961,6 +987,12 @@ event file under the shared `/tmp/afd_dump`.
 | toolagent | 4 | 8 | 1,418.3 | 2,059.7 | 44.0 | 45.9 |
 | toolagent | 8 | 16 | 1,314.7 | 2,058.4 | 31.1 | 31.9 |
 
+The prefill columns use only prefill-shape **2048/1** rows and the decode
+columns use decode-shape **512/2048** rows; decode-shape engine prefill is
+secondary and never pooled. `n` is measured requests per type×C (2/4/8/16),
+and each cell has only **two groups**, so these medians are descriptive rather
+than statistically strong.
+
 **Overall group rates.**
 
 | shape | C | groups | group rate med | group peak | group wall med (s) | engine overlap |
@@ -976,6 +1008,9 @@ event file under the shared `/tmp/afd_dump`.
 
 `engine overlap` is the maximum request-scoped `[scheduled_ts,
 last_token_ts]` overlap in a group.
+
+Group peaks are the fastest of eight groups, not sustained rates; the C8 decode
+peak (233.1 tok/s) is one group and is not a stable aggregate estimate.
 
 **Scaling and residency.** Offered concurrency rose 8×. Group prefill was flat
 from **2,633.4 tok/s at C1 to 2,664.6 at C8 (+1.2%)**; group decode rose
@@ -1015,16 +1050,16 @@ native concurrency at the configured `MAX_MODEL_LEN=1048576`. C8 block demand
 is **8,712** for prefill and **8,744** for decode of 18,320, so the tested
 shapes fit by block arithmetic.
 
-`nvidia-smi` GPU0 sampling measured **1,222 MiB** minimum free during boot,
+`nvidia-smi` GPU0 sampling measured **1,222 MiB** minimum free during boot/load,
 **1,656 MiB** in a post-boot idle snapshot, and **572 MiB** for all **7,612**
-campaign samples (19:57:16–20:34:38Z); used held at **96,678 MiB** from before
-warmups through the last C8 group. C8 added no measurable allocation above the
-boot/load watermark, there was no OOM, `preemptions_total=0`, and post-campaign
-idle was 96,678 MiB used / 572 MiB free. At that floor, a 512 MiB reserve
-allows only **+60 MiB** of cache (**2.059 GiB**, +537 blocks / +68,703
-tokens); a 1 GiB reserve leaves no room. A 3 GiB attempt did not complete a
-real prefill even after the indexer-bound and temporary-allocation fixes; it
-OOM'd in the MXFP8 upcast. **3 GiB is not claimed fit.**
+campaign samples (19:57:16–20:34:38Z; the summary's `startup` label is
+campaign-initial idle, not container boot); used held at **96,678 MiB** from
+before warmups through the last C8 group. C8 added no measurable allocation
+above the boot/load watermark, there was no OOM, `preemptions_total=0`, and
+post-campaign idle was 96,678 MiB used / 572 MiB free. At that floor, a 512 MiB
+reserve allows only **+60 MiB** of cache (**2.059 GiB**, +537 blocks / +68,703
+tokens); a 1 GiB reserve leaves no room. Only the 2 GiB pool was measured here;
+**no 3 GiB fit is claimed.**
 
 `MAX_MODEL_LEN=1,048,576` is a configured limit, not a tested context: the
 largest prompt tested is **2048 tokens**, the largest per-request total **2560**,
@@ -1033,17 +1068,254 @@ and the largest C8 prefill group **8×2048 prompt tokens**. The 2,073,385-token,
 measured 1M-token request and do not guarantee an unseen long-context workload.
 The largest verified request is 2560 tokens total.
 
-**Artifacts and reproduction.** Authoritative run: `campaign2/` under the
-concurrency results directory, run id `cwb-20261022T195826Z-dbc7fe`, 2,143.93 s
-wall, `summary.json` SHA256
-`58bac586beacf1ea963312c4cf3134876b01a6dfe74d7603ce103094a019b26b`. Its
+**Artifacts and reproduction.** Historical run: `campaign2/` under the
+concurrency results directory, run id `cwb-20261022T195826Z-dbc7fe`, 2,143.74 s
+wall. The historical offline summary is `summary_reprocessed.json` SHA256
+`731bfe52ea78c5304859da64a79d9d0b4f5e30751772c2b19edf42d5129fe547`, with
+companion `summary_reprocessed.md` SHA256
+`ec3b0559b3988d38a8cda38d730c6606219a4b7caf22664a9c57a3b45b5c4298`; the
+original `summary.json` is untouched
+(`58bac586beacf1ea963312c4cf3134876b01a6dfe74d7603ce103094a019b26b`). Its
 `rows.jsonl` (240 rows), `groups.jsonl` (64 groups), `engine_events_snapshot.jsonl`
-(442 lines; 272 for this run), `offline_report.txt` and
-`offline_overlap.json` are the sources. The table medians were recomputed from
-valid rows/groups and match the shape-specific summary block; the mixed-shape
-`by_type_concurrency` and `summary.md` tables are not used. No API rerun and no
-post-hoc row filtering were used. Launch recipe and harness command are in the
-README Run and Reproduce sections.
+(442 lines; 272 for this run), `offline_report.txt`, `offline_overlap.json`
+and `gpu_campaign2_250.csv` are the sources. Reprocessing joined 240/240 rows
+and 240/240 engine events; table medians match the shape-specific
+`summary_reprocessed` blocks. Prefill-shape and decode-shape results are kept
+separate and never pooled; mixed-shape blocks are not used. No API rerun and no
+post-hoc row filtering; 32 warmups are excluded. Launch recipe and harness
+command are historical and are not the current reproduction path; README
+Reproduce documents W10.
+
+### W10. Distinct-fixture concurrency campaign (2026-10-22; complete)
+
+**Validity.** The final distinct-fixture round served **64/64 groups and
+240/240 measured requests** at C1/2/4/8, with **32 warmup requests excluded**
+and zero warmup invalids. `invalid_requests=0`,
+`validation.all_groups_valid=true`, `exit_nonzero=false`, zero preemptions, and
+the process exited zero under `--strict --require-engine-events
+--require-exclusive`. The event file grew from a 446-line baseline by **272
+lines**; all 272 parsed, all request ids were unique and none foreign, and
+240/240 measured rows joined by unique request suffix with zero duplicate or
+missing events. Every row's request timestamps were monotone
+`queued_ts ≤ scheduled_ts ≤ first_token_ts ≤ last_token_ts ≤ finished_ts`;
+`num_cached_tokens` was zero (prefix caching off); finish reason was `length`
+for the forced decode. Every group's DSpark counters settled in **2 polls**
+with a **215–217 ms** maximum settle. Final service health was HTTP **200**
+with running/waiting/KV **0/0/0**, and no post-run counter movement.
+
+**Matrix, timing and recipe.** Prefill is **2048 prompt / 1 completion**;
+decode is **512 prompt / 2048 completion** with temperature 0, `ignore_eos=true`
+and `max_tokens == min_tokens`, so the measured decode window is **2047** tokens
+after the first multi-token chunk. Types are prose, structured, code and
+reasoning; C is 1/2/4/8; repeats 2 plus one warmup per execution configuration.
+Each type has one authored fixture and two groups per cell, so these are
+fixture-level observations, not category-level generalizations.
+Prefill and decode shapes are never pooled. The engine was **not restarted**
+for this campaign: retained k5, `MAX_MODEL_LEN=1048576`, `MAX_NUM_SEQS=8`,
+`MAX_NUM_BATCHED_TOKENS=2048`, captures `1,5,6,12,24,48`, native-context
+overlays, prefix caching off, `KV_CACHE_BYTES=2147483648`,
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=64`, `GPU_MEM_UTIL=0.97`. The harness sent
+the exact fixture prompt to raw `/v1/completions`; this is a forced-performance
+matrix, not a chat-quality or lossless evaluation.
+
+Run id **`20261022T215606Z-a83313`**, label `distinct-full`, started
+**21:56:03Z** and finished **22:39:58.817Z**. The 64 measured groups occupied
+**2,174.71 s (36m15s)**; the full harness wall, including 3.15 s startup and
+452.94 s warmup, was `wall_s=2631.831129` (**43m52s**). The earlier
+results-directory timestamp belongs to directory preparation and is not part of
+either figure. No API rerun or post-hoc row filtering was used.
+
+**Fixtures and oracle.** All four fixtures are authored and exactly tokenized;
+the approved task list SHA256 is `ae4e609041872142b269fe46a36ea4b8a2b14d7d94f0621628d17fadb2fcd52b`.
+The prefill prompt is 2048 tokens; decode uses a 512-token prompt from the same
+fixture.
+
+- `prose-mara-bracken-halt` — grounded close-third-person fiction: Mara, a
+  night-shift dispatcher at Bracken Halt, works the final hour before the rural
+  station closes; a delayed freight, a missing maintenance worker, an ambiguous
+  radio call and her estranged brother with their father's brass station clock
+  must resolve through ordinary operational facts, with no miraculous rescue,
+  accident, villain or reversal of the closure.
+- `structured-shipment-json` — convert supplied shipment JSONL into one typed
+  JSON object, preserving every record and its order, inventing no values; the
+  decode prompt carries the complete **SHP-3101** and **SHP-3102** records.
+- `code-thread-safe-lru` — implement a complete Python 3.12 thread-safe,
+  capacity-bounded LRU cache plus deterministic `unittest` tests using only the
+  standard library; get/put promotion, eviction, stored `None`, snapshot
+  independence and concurrent mixed operations are specified.
+- `reasoning-production-allocation` — weekly allocation of products A/B/C with
+  integer units, machining and finishing hours, material lots, committed and
+  capped demand, and fixed-block overtime; recommend the highest net
+  contribution the arithmetic supports and check every constraint against a
+  frozen CPU-enumerated oracle.
+
+**Metric definitions.** Engine prefill per request is
+`num_prompt_tokens / (first_token_ts - scheduled_ts)`; it includes the first
+generated token and scheduler interleaving, and queue wait is separate. Stream
+decode removes the entire first emitted chunk:
+`(usage.completion_tokens - len(first_chunk_token_ids)) /
+(last_token_arrival - first_token_arrival)`. Group prefill is
+`sum(prompt_tokens) / (last first_token - gate release)`; group decode is
+`sum(decode_tokens_after_first) / (last token - first token)`. Median and peak
+are over valid requests; peak is a single fastest request, not a sustained rate.
+Acceptance is `sum(accepted)/sum(proposed)` engine-counter delta over an
+exclusive group window, never an average of percentages and never a pooled
+lifetime counter. `steps` is `spec_decode_num_drafts_total`; per-position values
+are unconditional `accepted_at_position / steps`. `1 + accepted/steps` is a
+theoretical tokens/step including the bonus token, not proof of emitted or
+lossless throughput.
+
+**Decode per type × C.** Throughput columns are tok/s; `n` is measured requests.
+GPU0 minimum free was **572 MiB** in every cell.
+
+| type | C | n | median | peak | weighted accept | pos0 | pos1 | pos2 | pos3 | pos4 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| code | 1 | 2 | 111.18 | 119.78 | 0.8332 | 0.9408 | 0.8766 | 0.8224 | 0.7783 | 0.7481 |
+| code | 2 | 4 | 66.18 | 72.93 | 0.8100 | 0.9452 | 0.8725 | 0.8028 | 0.7418 | 0.6876 |
+| code | 4 | 8 | 35.74 | 41.97 | 0.7822 | 0.9353 | 0.8541 | 0.7805 | 0.7065 | 0.6343 |
+| code | 8 | 16 | 26.02 | 29.65 | 0.8080 | 0.9370 | 0.8682 | 0.8030 | 0.7446 | 0.6871 |
+| prose | 1 | 2 | 50.56 | 52.36 | 0.2336 | 0.6231 | 0.3155 | 0.1419 | 0.0646 | 0.0228 |
+| prose | 2 | 4 | 32.49 | 35.00 | 0.2464 | 0.6367 | 0.3456 | 0.1571 | 0.0694 | 0.0231 |
+| prose | 4 | 8 | 18.49 | 19.01 | 0.2240 | 0.5998 | 0.3076 | 0.1371 | 0.0555 | 0.0201 |
+| prose | 8 | 16 | 13.02 | 15.31 | 0.2377 | 0.6164 | 0.3267 | 0.1531 | 0.0661 | 0.0260 |
+| reasoning | 1 | 2 | 81.73 | 86.51 | 0.5237 | 0.8305 | 0.6372 | 0.4916 | 0.3680 | 0.2913 |
+| reasoning | 2 | 4 | 54.60 | 55.83 | 0.5691 | 0.8527 | 0.6895 | 0.5497 | 0.4212 | 0.3326 |
+| reasoning | 4 | 8 | 32.66 | 36.79 | 0.5768 | 0.8467 | 0.6858 | 0.5538 | 0.4417 | 0.3562 |
+| reasoning | 8 | 16 | 20.89 | 30.02 | 0.5909 | 0.8728 | 0.7288 | 0.5806 | 0.4409 | 0.3313 |
+| structured | 1 | 2 | 98.39 | 106.76 | 0.7162 | 0.9240 | 0.8223 | 0.7151 | 0.6045 | 0.5151 |
+| structured | 2 | 4 | 59.73 | 66.62 | 0.6958 | 0.9120 | 0.8027 | 0.6962 | 0.5847 | 0.4836 |
+| structured | 4 | 8 | 36.78 | 42.07 | 0.8088 | 0.9474 | 0.8917 | 0.8163 | 0.7372 | 0.6514 |
+| structured | 8 | 16 | 23.61 | 29.20 | 0.7196 | 0.9087 | 0.8159 | 0.7173 | 0.6197 | 0.5363 |
+
+**Prefill per type × C.** Engine-prefill tok/s and TTFT seconds; peaks are
+single fastest requests. Every cell's GPU0 minimum free was **572 MiB**.
+
+| type | C | n | median | peak | TTFT median |
+|---|---:|---:|---:|---:|---:|
+| code | 1 | 2 | 2,717.73 | 2,719.09 | 0.7662 |
+| code | 2 | 4 | 1,868.90 | 2,180.21 | 1.4218 |
+| code | 4 | 8 | 1,459.88 | 2,178.43 | 2.4580 |
+| code | 8 | 16 | 1,364.21 | 2,174.85 | 3.9607 |
+| prose | 1 | 2 | 2,712.79 | 2,714.31 | 0.7675 |
+| prose | 2 | 4 | 1,862.37 | 2,166.44 | 1.4228 |
+| prose | 4 | 8 | 1,459.87 | 2,170.48 | 2.4570 |
+| prose | 8 | 16 | 1,362.44 | 2,169.66 | 3.9609 |
+| reasoning | 1 | 2 | 2,727.36 | 2,727.83 | 0.7636 |
+| reasoning | 2 | 4 | 1,874.28 | 2,183.51 | 1.4156 |
+| reasoning | 4 | 8 | 1,467.35 | 2,183.00 | 2.4450 |
+| reasoning | 8 | 16 | 1,369.70 | 2,186.63 | 3.9419 |
+| structured | 1 | 2 | 2,670.86 | 2,672.67 | 0.7793 |
+| structured | 2 | 4 | 1,830.00 | 2,123.23 | 1.4439 |
+| structured | 4 | 8 | 1,439.81 | 2,123.77 | 2.4907 |
+| structured | 8 | 16 | 1,341.59 | 2,124.36 | 4.0178 |
+
+**Overall shape × C.**
+
+| shape | C | groups | requests | req med | req peak | group med | group peak | wall med s | TTFT med s | active max | queue overlap max | queue time max s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| prefill | 1 | 8 | 8 | 2,715.34 | 2,727.83 | 2,679.00 | 2,691.69 | 0.768 | 0.767 | 1 | 1 | <0.001 |
+| prefill | 2 | 8 | 16 | 1,843.53 | 2,183.51 | 2,702.13 | 2,716.10 | 1.519 | 1.427 | 2 | 1 | <0.001 |
+| prefill | 4 | 8 | 32 | 1,454.45 | 2,183.00 | 2,712.25 | 2,724.38 | 3.024 | 2.464 | 2 | 3 | 1.50 |
+| prefill | 8 | 8 | 64 | 1,364.21 | 2,186.63 | 2,716.73 | 2,729.98 | 6.034 | 3.976 | 2 | 7 | 4.51 |
+| decode | 1 | 8 | 8 | 88.27 | 119.78 | 88.27 | 119.78 | 23.630 | 0.424 | 1 | 1 | <0.001 |
+| decode | 2 | 8 | 16 | 55.81 | 72.93 | 107.91 | 132.08 | 38.693 | 0.817 | 2 | 1 | <0.001 |
+| decode | 4 | 8 | 32 | 33.74 | 42.07 | 125.23 | 147.58 | 66.494 | 1.141 | 4 | 3 | <0.001 |
+| decode | 8 | 8 | 64 | 22.05 | 30.02 | 163.09 | 200.24 | 101.482 | 1.905 | 8 | 7 | 0.766 |
+
+Group prefill was **2,679.00 → 2,716.73 tok/s (+1.4%)** from C1 to C8; group
+decode rose **88.27 → 163.09 tok/s (1.85×)**. Per-request medians fell
+**2,715.34 → 1,364.21** (prefill) and **88.27 → 22.05** (decode), while group
+walls rose **0.768 → 6.034 s** and **23.630 → 101.482 s**. The C1 per-request
+decode median is **88.27**; the best per-type C1 median is **111.18** (code),
+peak **119.78**. The **163.09 C8 figure is a multi-request group aggregate**,
+not a single-stream result; no per-request or per-type median reaches the
+**120 tok/s** target.
+
+**Acceptance aggregate.** Across 32/32 decode groups: **69,404 steps**,
+**347,020 proposed** draft tokens, **176,466 accepted**, weighted **0.5085**
+(50.85%). Per-position unconditional acceptance was **78.53% / 60.22% /
+46.89% / 37.58% / 31.04%** at positions 0–4; per-position accepted counts sum
+to the 176,466 total and the five-step proposal check passed. The derived
+`1 + accepted/steps` was **3.5426** tokens/step; the actual
+generation-counter rate was **3.5410** tokens/step, which includes the first
+generated token and final output-limit truncation. Neither is a lossless,
+quality or batch-invariance proof. Prefill groups validated with proposed=0 and
+steps=0, so their acceptance is **N/A**, not zero.
+
+| type | weighted accept | pos0 | pos1 | pos2 | pos3 | pos4 |
+|---|---:|---:|---:|---:|---:|---:|
+| prose | 0.2348 | 61.49% | 32.32% | 14.85% | 6.36% | 2.38% |
+| structured | 0.7382 | 91.98% | 83.33% | 73.87% | 64.29% | 55.60% |
+| code | 0.8029 | 93.78% | 86.55% | 79.81% | 73.61% | 67.68% |
+| reasoning | 0.5793 | 86.00% | 70.54% | 56.28% | 43.32% | 33.52% |
+| all decode | 0.5085 | 78.53% | 60.22% | 46.89% | 37.58% | 31.04% |
+
+**Residency and queues.** Using actual request intervals
+`[scheduled,last_token)` (not post-group gauges), decode `active_max` is exactly
+**1/2/4/8** at C1/2/4/8 for every type and repeat; all eight C8 decode requests
+receive tokens. Prefill `active_max` is **1/2/2/2** because one 2048-token
+prompt fills `MAX_NUM_BATCHED_TOKENS=2048`; queued-interval overlap reaches
+**3 at C4 and 7 at C8**, with queue-time maxima **1.50 s** and **4.51 s**.
+Offered C4/C8 are therefore not fully resident for prefill; C8 prefill is a
+queued control, not eight parallel prefills. The C8 decode queue-time maximum
+is **0.766 s**, not a failure. Before/after metric snapshots per group give
+exact prompt/generation/success deltas; no old-campaign lifetime counters are
+pooled into these figures.
+
+**Memory.** The headerless GPU CSV has **8,938 rows**, of which **8,937 are
+GPU0 samples** at 250 ms. GPU0 minimum free was **572 MiB** in every type×C
+cell and every sampled phase; maximum used was **96,678 MiB**, peak utilization
+**100%**, peak power **196.08 W**. There was no OOM, no preemption and no
+measured leak. This is an observed floor, not a reserve or future-headroom
+claim.
+
+The explicit 2 GiB pool reported **18,320 blocks × 117,216 B =
+2,147,397,120 B** (86,528 B spare), block size **128**, `nvfp4_ds_mla`,
+**2,073,385 tokens**, and **1.977334×** maximum native concurrency at the
+configured 1,048,576-token admission cap. A 512 MiB reserve at the 572 MiB
+floor leaves only **+60 MiB** of cache (**2.06 GiB**, +537 blocks / +68,703
+tokens); a 1 GiB reserve leaves no room. **No 3 GiB fit is claimed.** The
+largest prompt tested is **2048 tokens**, the largest total **2560**, and the
+largest C8 prefill group **8 × 2048 prompt tokens**; the 1,048,576-token value
+is an admission limit, not a tested 1M-token request.
+
+**Artifacts, hashes and counts.** Relative to the concurrency results
+directory: `campaign/summary.json` SHA256
+`96b70046116ec203e4b8a8482f65be01df30d7d8f20a8106d93fcbb15732b6e2`;
+`campaign/summary.md` `8c1301adc7fed32e78046f14000f17ca9725ffec9ca66670aa1f309b8a8bc4f3`;
+`campaign/rows.jsonl` (240 rows) `ed6aaf3d53ce3434cbba62b6e8b3994af5b946c6e8a77577427e522060770b73`;
+`campaign/groups.jsonl` (64 groups) `a66153791f1b1b8bb2251a3ef7fa5d3c6b962745f4b6587dee16ce7881031b78`;
+`campaign_engine_events.jsonl` (272 request events) `066486d14da8e3c1faec56ef3f23b49e75f81eed01ab102eba3059ee4078e104`;
+`gpu_campaign.csv` `8e694b02bf06eab42116ddbd42dc2623161d8ebc253bf762dff11ce8a24a37f7`;
+`analysis/artifact_summary.json` `f8c309b37426ced081fd405826942921882769e2ede69748054a3f7458a5a0d9`.
+There are 128 per-group before/after metric files under `campaign/metrics/`,
+8 prompts, 32 warmups, 240 measured rows, 64 groups and 272 events. Prompt
+index SHA256 `b12a6fa54d61c17145e7dfce1a14070739eb3dd9277d0f78250069a3453c76e5`;
+prep manifest `67b09d355e5adad4777fae4d6dce0208ef01ee638d5991c97bd308977c5ae0b2`.
+Harness SHA256 `25e356711a7911fb4a982227c91795c9ebef666a600fd6ad3b59ed82a8eac0c2`;
+fixtures module `0584df502a2a98ac09788c33df498263ba2d59311eba326e80ce4d457d319a1f`.
+
+**Reproduction.**
+
+```bash
+python3 -u eval/concurrency_workload_eval.py \
+  --base-url http://127.0.0.1:8001 \
+  --engine-event-file /tmp/afd_dump/cwb-engine-events.jsonl \
+  --metrics --metrics-interval 0.2 --metrics-settle-timeout 12 --metrics-settle-poll 0.2 \
+  --spec-k 5 --spec-strict --require-exclusive --strict --require-engine-events --overwrite \
+  --out <results-dir>/campaign --label distinct-full \
+  --types prose,structured,code,reasoning --shapes prefill,decode \
+  --concurrency 1,2,4,8 --repeats 2 --warmup 1 \
+  --prefill-tokens 2048 --prefill-output 1 --decode-tokens 512 --decode-output 2048 \
+  --gpu-csv <results-dir>/gpu_campaign.csv \
+  --cache-capacity-json <results-dir>/cache_capacity_c8_kv2g.json
+```
+
+Defaults: `--seed 20261022`, `--timeout 600`, `--engine-event-timeout 30`,
+`--idle-timeout 120`. The harness writes `summary.json` / `summary.md` from the
+measured rows; `analysis/artifact_summary.json` aggregates counts and hashes.
+No API rerun or offline reprocessing step is needed for those summaries. Launch
+recipe details are in the README Results and Reproduce sections.
 
 ## 5. Gates and order
 

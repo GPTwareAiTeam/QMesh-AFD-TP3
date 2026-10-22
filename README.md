@@ -32,7 +32,7 @@ The non-spec round reached a median **56.86 tok/s** (5 × 256-token runs,
 **102.82 tok/s** in the long-decode condition (k5, 128 prompt / 1024 completion)
 and **82.13 tok/s** in the short-decode condition (k3, 1024 prompt / 128
 completion). The **120 tok/s target was not reached by any per-request or
-aggregate-pair median, and no lossless or formal quality claim is made.
+aggregate-pair median**, and no lossless or formal quality claim is made.
 
 A matched k5/k7 A/B then measured `SPEC_TOKENS=7` (captures 1,7,8, max 8)
 against the retained k5 under the same engine budget: k5 **77.84 / 105.07
@@ -40,11 +40,17 @@ tok/s**, k7 **67.67 / 95.97 tok/s** (short / long decode), **−13.07% / −8.65
 acceptance **0.6918 vs 0.5486**, and no quality gain (**15/16** in all three k5
 passes vs **15/16, 15/16, 14/16** at k7). k7 was rejected and k5 restored.
 
-A 2 GiB explicit KV pool then served 240/240 valid concurrency requests at
-C1/2/4/8 on the same k5 stack. For 8× offered concurrency, group decode
-throughput rose 1.90× and group prefill stayed flat (+1.2%), while per-request
-latency rose; C1 is the latency-optimal point. A 3 GiB attempt did not complete
-a real prefill.
+The final 2026-10-22 campaign replaced the earlier reusable fixtures with four
+authored, exactly tokenized tasks (prose, structured JSON, Python code and a
+CPU-oracle reasoning problem). One boot with a **2 GiB explicit KV pool** served
+**64/64 groups and 240/240 measured requests** at C1/2/4/8 with zero invalid
+rows, zero preemptions and healthy post-run state. The overall per-request decode
+median was **88.27 tok/s at C1** and **22.05 at C8**; the best per-type C1 median
+was **111.18 tok/s** (code, peak 119.78). The C8 group aggregate was **163.09
+tok/s**, but that is eight concurrent requests, not a single-request result.
+Group prefill stayed flat (2,679.00 → 2,716.73 tok/s, +1.4%). These distinct
+fixtures are not directly comparable to the earlier reusable-fixture campaign,
+and this campaign measured only the 2 GiB pool; no 3 GiB fit is claimed.
 
 ## Getting started
 
@@ -453,11 +459,142 @@ generated token and scheduler interleaving. Neither figure is comparable to a
 pure prefill kernel. Decode rates are the streaming decode-window rate derived
 from the endpoint's completion-token usage, never chunk counts.
 
-### Concurrency and KV-cache campaign (2026-10-22)
+### Distinct-fixture concurrency campaign (2026-10-22; current)
+
+The final campaign used four authored fixtures rather than the earlier reusable
+prompt sets: a **prose** story with fixed station/family facts, a **structured**
+shipment-records-to-typed-JSON task, a **code** task for a thread-safe
+capacity-bounded Python 3.12 LRU cache and tests, and a **reasoning** production
+allocation problem with a frozen, CPU-enumerated oracle. Each fixture is
+tokenized to exactly **2048** tokens for the prefill prompt; decode uses **512**
+prompt tokens from the same fixture, and the structured decode prompt carries
+both complete shipment records (SHP-3101 and SHP-3102). The task text and
+expected-shape guidance are in `eval/fixtures_distinct.py` (SHA256
+`0584df50…`); the approved task list is SHA256 `ae4e6090…`.
+
+One boot, not restarted for this run, served the matrix with the retained k5
+recipe: `MAX_MODEL_LEN=1048576`, `MAX_NUM_SEQS=8`,
+`MAX_NUM_BATCHED_TOKENS=2048`, captures `1,5,6,12,24,48`, native-context
+overlays, prefix caching off, and an explicit **2 GiB** KV pool. It completed
+**64/64 groups, 240/240 measured requests and 32 excluded warmups**, with zero
+invalid rows, zero preemptions, **272 unique engine events** and no foreign
+request IDs, then exited zero under `--strict --require-engine-events` and
+`--require-exclusive`. Run
+`20261022T215606Z-a83313` ran **21:56:03–22:39:58Z**; the 64 measured groups
+took **2,174.71 s (36m15s)**, and the full harness wall including startup and
+warmup was **2,631.831 s (43m52s)**; final HTTP health was **200** with
+running/waiting/KV **0/0/0** and no post-run counter movement.
+
+Prefill is **2048 prompt / 1 completion**; decode is **512 prompt / 2048
+completion** with `ignore_eos` and `max_tokens == min_tokens`, so the decode
+window measures **2047** tokens after the first chunk. Engine prefill is
+`prompt_tokens / (first_token_ts - scheduled_ts)`; stream decode removes the
+whole first multi-token emission, `(usage.completion_tokens -
+len(first_chunk_token_ids)) / (last_token_arrival - first_token_arrival)`.
+Group prefill is `sum(prompt_tokens) / (last first_token - gate release)`;
+group decode is `sum(decode_tokens_after_first) / (last token - first token)`.
+Medians and peaks below are per valid request; peak is the single fastest
+request, never a sustained rate. `n` is 2/4/8/16 measured requests per cell
+(two groups), so the cells are descriptive, not statistically strong. Each type
+has one authored fixture and two groups per cell; these are fixture-level
+observations, not category-level generalizations.
+
+| type | C | n | prefill med | prefill peak | decode med | decode peak | weighted accept |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| prose | 1 | 2 | 2,712.79 | 2,714.31 | 50.56 | 52.36 | 0.2336 |
+| prose | 2 | 4 | 1,862.37 | 2,166.44 | 32.49 | 35.00 | 0.2464 |
+| prose | 4 | 8 | 1,459.87 | 2,170.48 | 18.49 | 19.01 | 0.2240 |
+| prose | 8 | 16 | 1,362.44 | 2,169.66 | 13.02 | 15.31 | 0.2377 |
+| structured | 1 | 2 | 2,670.86 | 2,672.67 | 98.39 | 106.76 | 0.7162 |
+| structured | 2 | 4 | 1,830.00 | 2,123.23 | 59.73 | 66.62 | 0.6958 |
+| structured | 4 | 8 | 1,439.81 | 2,123.77 | 36.78 | 42.07 | 0.8088 |
+| structured | 8 | 16 | 1,341.59 | 2,124.36 | 23.61 | 29.20 | 0.7196 |
+| code | 1 | 2 | 2,717.73 | 2,719.09 | 111.18 | 119.78 | 0.8332 |
+| code | 2 | 4 | 1,868.90 | 2,180.21 | 66.18 | 72.93 | 0.8100 |
+| code | 4 | 8 | 1,459.88 | 2,178.43 | 35.74 | 41.97 | 0.7822 |
+| code | 8 | 16 | 1,364.21 | 2,174.85 | 26.02 | 29.65 | 0.8080 |
+| reasoning | 1 | 2 | 2,727.36 | 2,727.83 | 81.73 | 86.51 | 0.5237 |
+| reasoning | 2 | 4 | 1,874.28 | 2,183.51 | 54.60 | 55.83 | 0.5691 |
+| reasoning | 4 | 8 | 1,467.35 | 2,183.00 | 32.66 | 36.79 | 0.5768 |
+| reasoning | 8 | 16 | 1,369.70 | 2,186.63 | 20.89 | 30.02 | 0.5909 |
+
+Prefill columns use only prefill-shape 2048/1 rows; decode columns use
+decode-shape 512/2048 rows. Decode-shape engine prefill is secondary and never
+pooled. The weighted acceptance column is `sum(accepted draft tokens) /
+sum(proposed draft tokens)` for that cell, not a mean of percentages.
+
+| shape | C | requests | per-request med | per-request peak | group med | group peak | group wall med (s) | TTFT med (s) | active max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| prefill | 1 | 8 | 2,715.34 | 2,727.83 | 2,679.00 | 2,691.69 | 0.768 | 0.767 | 1 |
+| prefill | 2 | 16 | 1,843.53 | 2,183.51 | 2,702.13 | 2,716.10 | 1.519 | 1.427 | 2 |
+| prefill | 4 | 32 | 1,454.45 | 2,183.00 | 2,712.25 | 2,724.38 | 3.024 | 2.464 | 2 |
+| prefill | 8 | 64 | 1,364.21 | 2,186.63 | 2,716.73 | 2,729.98 | 6.034 | 3.976 | 2 |
+| decode | 1 | 8 | 88.27 | 119.78 | 88.27 | 119.78 | 23.630 | 0.424 | 1 |
+| decode | 2 | 16 | 55.81 | 72.93 | 107.91 | 132.08 | 38.693 | 0.817 | 2 |
+| decode | 4 | 32 | 33.74 | 42.07 | 125.23 | 147.58 | 66.494 | 1.141 | 4 |
+| decode | 8 | 64 | 22.05 | 30.02 | 163.09 | 200.24 | 101.482 | 1.905 | 8 |
+
+From C1 to C8, group prefill was flat at **2,679.00 → 2,716.73 tok/s (+1.4%)**
+and group decode rose **88.27 → 163.09 tok/s (1.85×)** for 8× offered
+concurrency. Per-request medians fell **2,715.34 → 1,364.21** (prefill) and
+**88.27 → 22.05** (decode); group walls rose **0.768 → 6.034 s** and
+**23.630 → 101.482 s**. C1 is the latency-optimal point.
+
+**The 120 tok/s target is a single-stream, per-request target.** The overall C1
+per-request decode median is **88.27**; the best per-type C1 median is
+**111.18** with a single-request peak of **119.78** (code). No per-request or
+per-type median reaches 120. The **163.09 tok/s C8 value is a group aggregate
+across eight concurrent requests**, not a single-request result. The earlier
+old-fixture tool-agent peak of **135.0 tok/s** remains historical evidence for
+that fixture set; these distinct fixtures neither reproduce nor replace it, and
+the two sets are not directly comparable.
+
+**DSpark acceptance (decode only).** Across all 32 decode groups, **69,404
+steps** proposed **347,020** draft tokens and accepted **176,466**, weighted
+**0.5085** (50.85%). Per-position unconditional acceptance was **0.7853 /
+0.6022 / 0.4689 / 0.3758 / 0.3104** at positions 0–4. The derived
+**1 + accepted/steps = 3.5426** tokens/step is theoretical and includes the
+bonus token; the actual generation-counter rate was **3.5410** tokens/step,
+which also includes the first generated token and final output-limit
+truncation. Neither is a lossless, quality or batch-invariance proof. Prefill
+groups proposed zero draft tokens, so their acceptance is **N/A**, not zero.
+
+**Residency, queues, memory and source pins.** Decode request-scoped
+`[scheduled, last]` overlap is exactly **1/2/4/8** at C1/2/4/8 for every type
+and repeat; all eight C8 requests receive tokens. Prefill `active_max` is only
+**2** at C4/C8 because one 2048-token prompt fills the entire
+`MAX_NUM_BATCHED_TOKENS=2048` budget, so offered C4/C8 are not fully resident
+for prefill: queue-time maxima were **1.50 s at C4 and 4.51 s at C8** (decode
+C8: 0.766 s). C8 prefill is a queued control, not eight parallel prefills.
+Every group's DSpark counters settled in two polls (maximum 215–217 ms);
+`/metrics` running gauges were not used as residency proof.
+
+The headerless GPU CSV has **8,938 rows**, of which **8,937 are GPU0 samples**
+at 250 ms, with a **572 MiB** free floor in every type×C cell, **96,678 MiB**
+maximum used, 100% peak utilization and **196.08 W** peak power. This is an
+observed floor, not a reserve or future-headroom estimate; no 3 GiB fit is
+claimed. Source pins: harness `25e35671…`, fixtures `0584df50…`, contexts and
+prompt index `2433c0eb…` / `b12a6fa5…`, prep manifest `67b09d35…`. Artifacts
+are named relative to the concurrency results directory: `campaign/summary.json`
+(SHA256 `96b70046…`), `campaign/summary.md` (`8c1301ad…`), `rows.jsonl`
+(`ed6aaf3d…`), `groups.jsonl` (`a6615379…`), `campaign_engine_events.jsonl`
+(`066486d1…`), `gpu_campaign.csv` (`8e694b02…`) and
+`analysis/artifact_summary.json` (`f8c309b3…`), with 128 per-group
+before/after metric files under `campaign/metrics/`.
+
+### Earlier concurrency campaign (old reusable fixtures, 2026-10-22; historical)
+
+**Historical evidence with the old reusable fixtures and old type labels.**
+These tables and figures are preserved exactly but are not directly comparable
+to the current distinct-fixture campaign. The **135.0 tok/s** single-request
+peak is a historical old-tool-agent observation, not a current hardware limit.
+
+#### Old-fixture measurement table (historical)
 
 One boot configured for native 1,048,576 tokens (no 1M request was sent) with
 an explicit 2 GiB KV pool served the full matrix: **64/64 groups, 240/240
-measured requests, 32/32 warmup requests also valid**, zero preemptions.
+measured requests, plus 32 warmup requests with zero invalids**, zero
+preemptions. Warmups are excluded from the 240.
 Prefill is **2048 prompt / 1 completion**; decode is **512 prompt / 2048
 completion**. Recipe: k5, `MAX_MODEL_LEN=1048576`, `MAX_NUM_SEQS=8`,
 `MAX_NUM_BATCHED_TOKENS=2048`, captures `1,5,6,12,24,48`,
@@ -469,7 +606,11 @@ decode is `(usage.completion_tokens - len(first_chunk_token_ids)) /
 `sum(prompt_tokens) / (last first_token - gate release)`; group decode is
 `sum(decode_tokens_after_first) / (last token - first token)`. Median and peak
 are over valid requests; peak is the single fastest request, not a sustained
-rate.
+rate. The prefill columns use only prefill-shape **2048/1** rows and the decode
+columns use decode-shape **512/2048** rows; decode-shape engine prefill is
+secondary and never pooled. `n` is measured requests per type×C (2/4/8/16),
+with two groups per cell, so these medians are descriptive rather than
+statistically strong.
 
 | type | C | n | prefill med | prefill peak | decode med | decode peak |
 |---|---:|---:|---:|---:|---:|---:|
@@ -515,9 +656,9 @@ after completion; an independent 250 ms watcher over the last 20 groups
 recorded decode running **1/2/4/8** and C8 prefill running **1** / waiting
 **6**. Its cache-usage gauge reported 0.0 throughout and is unusable.
 
-The 2 GiB pool, the 572 MiB campaign minimum and the failed 3 GiB attempt are
-in [Memory](#memory). The 2,073,385-token and 1.98× figures there are admission
-arithmetic, not a measured 1M-token request.
+The 2 GiB pool and the 572 MiB campaign minimum are in [Memory](#memory). The
+2,073,385-token and 1.98× figures there are admission arithmetic, not a measured
+1M-token request.
 
 ### Quality
 
@@ -570,22 +711,25 @@ GPU0 read **95,398 MiB used / 1,852 MiB free**; the restored k5 read **93,536
 MiB used / 3,714 MiB free** at idle. Free memory is what the driver reported in
 each snapshot, never total-minus-used.
 
-The concurrency campaign used an explicit **2 GiB KV pool** on the same k5
-stack. The engine reported **18,320 blocks × 117,216 B = 2,147,397,120 B**
-(86,528 B spare), block size **128**, `nvfp4_ds_mla`, **2,073,385 tokens**, and
-**1.98×** maximum native concurrency at the configured 1,048,576-token limit.
-`nvidia-smi` measured **1,222 MiB** minimum free during boot and **572 MiB** for
-every campaign sample (7,612 samples, 19:57:16–20:34:38Z); used held at
-**96,678 MiB** from before warmups through the last C8 group, so C8 added no
-measurable allocation above that watermark. A **1,656 MiB** post-boot idle
-snapshot preceded the campaign. There was no OOM, no preemption and no measured
-leak.
+The final distinct-fixture campaign used an explicit **2 GiB KV pool** on the
+same k5 stack, not restarted for the run. The engine reported **18,320 blocks ×
+117,216 B = 2,147,397,120 B** (86,528 B spare), block size **128**,
+`nvfp4_ds_mla`, **2,073,385 tokens**, and **1.98×** maximum native concurrency
+at the configured 1,048,576-token limit. The headerless GPU CSV has **8,938
+rows**, of which **8,937 are GPU0 samples** at **250 ms**; the free floor was
+**572 MiB** in every type×C cell and every sampled phase, used reached
+**96,678 MiB**, utilization peaked at **100%** and power at **196.08 W**. There
+was no OOM, no preemption and no measured leak. This is an observed campaign
+floor, not a reserve or a forecast of future headroom.
 
-At the 572 MiB floor, a **512 MiB** reserve allows only **+60 MiB** of cache
+At that floor, a **512 MiB** reserve allows only **+60 MiB** of cache
 (**2.06 GiB**, +537 blocks / +68,703 tokens); a 1 GiB reserve leaves no room.
-The 2 GiB pool was selected because a 3 GiB attempt did not complete a real
-prefill even after the indexer-bound and temporary-allocation fixes; 3 GiB is
-not claimed fit.
+Only the 2 GiB pool was measured; **no 3 GiB fit is claimed.**
+
+The earlier old-fixture campaign recorded **7,612** samples with the same
+**572 MiB** floor and **96,678 MiB** watermark, plus a **1,222 MiB** boot/load
+minimum and **1,656 MiB** post-boot idle snapshot. Those numbers are retained
+as historical context for that run.
 
 The token and concurrency figures are pool/admission arithmetic, not a measured
 1M-token request. `MAX_MODEL_LEN` was **1,048,576**, but the largest prompt
@@ -636,34 +780,48 @@ python3 eval/dspark_workload_eval.py --execute --label k7 \
 python3 eval/dspark_workload_eval.py --compare <k5-dir> <k7-dir> --out-dir <cmp-dir>
 ```
 
-The concurrency / KV campaign uses its own harness against the same endpoint:
+The distinct-fixture concurrency / KV campaign uses
+`eval/fixtures_distinct.py` through its own harness against the same endpoint:
 
 ```bash
-python3 eval/concurrency_workload_eval.py \
+python3 -u eval/concurrency_workload_eval.py \
   --base-url http://127.0.0.1:8001 \
-  --out <results-dir>/campaign \
-  --types code,prose,json,toolagent --shapes prefill,decode \
-  --concurrency 1,2,4,8 --repeats 2 --warmup 1 \
   --engine-event-file /tmp/afd_dump/cwb-engine-events.jsonl \
-  --require-engine-events --strict \
-  --cache-capacity-json <results-dir>/cache_capacity_c8_kv2g.json \
-  --overwrite
+  --metrics --metrics-interval 0.2 --metrics-settle-timeout 12 --metrics-settle-poll 0.2 \
+  --spec-k 5 --spec-strict --require-exclusive --strict --require-engine-events --overwrite \
+  --out <results-dir>/campaign --label distinct-full \
+  --types prose,structured,code,reasoning --shapes prefill,decode \
+  --concurrency 1,2,4,8 --repeats 2 --warmup 1 \
+  --prefill-tokens 2048 --prefill-output 1 --decode-tokens 512 --decode-output 2048 \
+  --gpu-csv <results-dir>/gpu_campaign.csv \
+  --cache-capacity-json <results-dir>/cache_capacity_c8_kv2g.json
 ```
+
+Defaults used were `--seed 20261022`, `--timeout 600`,
+`--engine-event-timeout 30` and `--idle-timeout 120`. The harness sends the
+exact fixture prompt to raw `/v1/completions` with temperature 0,
+`ignore_eos=true` and `max_tokens == min_tokens`, so this is a forced-performance
+measurement, not a chat-quality evaluation. It writes `campaign/summary.json`
+and `summary.md` directly from the measured rows, with counts, hashes and GPU
+aggregates in `analysis/artifact_summary.json`; no API rerun or offline
+reprocessing step is needed for those summaries.
 
 `--cache-capacity-json` is the block-arithmetic input used for the capacity
 cross-check, not an engine measurement. `--require-engine-events` rejects rows
-without a request-scoped engine event.
+without a request-scoped engine event, and `--require-exclusive` rejects
+non-exclusive groups.
 
-`--base-url` defaults to `http://127.0.0.1:8001`; `--seed 1017` and
-`--timeout` are configurable. `--quality-only --quality-mode chat` runs the
-quality probes without timed replay. `--engine-container` additionally samples
+`--base-url` defaults to `http://127.0.0.1:8001`; the concurrency harness seed
+defaults to `20261022`, and `--timeout` is configurable. `--quality-only
+--quality-mode chat` (DSpark harness) runs the quality probes without timed
+replay. `--engine-container` additionally samples
 container/GPU counters when available; `--no-metrics` disables that.
 
 ## Repository map
 
 | Path | Contents |
 |---|---|
-| `PLAN.md` | Full implementation plan: topology, memory ledger, workstreams W0–W9, gates, risks, DeepInfer review, DSpark and concurrency results |
+| `PLAN.md` | Full implementation plan: topology, memory ledger, workstreams W0–W10, gates, risks, DeepInfer review, DSpark and concurrency results |
 | `GX_FP4_DECODE_CEILING.md` | Kernel and transport ceiling measurements behind the decode-rate limits |
 | `INVENTORY.md` | Measured host, network, memory, NVMe and transport numbers, with site identifiers removed |
 | `gateA/` | Early transport benchmark, GX memory probe and summarized results |
@@ -673,7 +831,7 @@ container/GPU counters when available; `--no-metrics` disables that.
 | `gx/` | GX worker and ingestion/graph code, worker-side kernels |
 | `third_party/vllm/` | Apache-2.0 license text and third-party notice for the vLLM-derived files |
 | `native/` | Current transport sources and offline build script (vendored; see `PROVENANCE.md`) |
-| `eval/` | OpenAI-endpoint workload and quality harness |
+| `eval/` | OpenAI-endpoint workload and quality harnesses, including `fixtures_distinct.py` for the four authored contexts |
 | `tools/` | Download and shard-verification scripts |
 | `scripts/` | Engine launcher, GX worker control, local site template |
 

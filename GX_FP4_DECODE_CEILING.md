@@ -43,8 +43,21 @@ CPU-proven plus runtime-functional, not a full suffix bitwise proof. Per-type
 medians and quality probes are in PLAN W8 and
 the DSpark final-results artifact.
 
+**Current concurrency round (2026-10-22, distinct fixtures; complete; PLAN
+W10).** Four authored fixtures served **64/64 groups and 240/240 measured
+requests** at C1/2/4/8 on the retained k5 and a 2 GiB explicit KV pool, with
+zero invalid rows and zero preemptions. Overall per-request decode was
+**88.27 tok/s at C1** and **22.05 at C8**; the best per-type C1 median was
+**111.18** (code, peak **119.78**). The **163.09 tok/s C8** value is an
+eight-request group aggregate, so no single-stream 120 tok/s result is
+established. Group prefill was flat (**2,679.00 → 2,716.73 tok/s, +1.4%**).
+Weighted decode acceptance was **0.5085**; prefill acceptance is N/A. Prefill
+residency peaks at 2 concurrent prefills, so C4/C8 queue. GPU0 free floor was
+**572 MiB**; no 3 GiB fit or 1M-token request is claimed.
+
 Prefill, SessionFix and transport evidence are in PLAN W5/W7; the campaign
-ledgers are PLAN W7.1 (2026-10-21), W7.2 (pre-DSpark) and W8 (DSpark). The p7.2
+ledgers are PLAN W7.1 (2026-10-21), W7.2 (pre-DSpark), W8 (DSpark), W9
+(earlier old fixtures) and W10 (distinct fixtures). The p7.2
 and p7.3 pre-change baseline traces are in §5; p7.1 remains the pre-ingest
 baseline.
 The W4A16 accuracy caveat in §1 remains.
@@ -805,7 +818,58 @@ scripts/launch_engine_graphs.sh`. Artifacts (eval results directory, untracked):
 `round_k5_restore_20261022T125508Z/`, `compare_k7_20261022T125136Z.txt`,
 `k7_result_20261022T130500Z.json`.
 
-### 2026-10-22 concurrency / 2 GiB KV campaign
+### 2026-10-22 distinct-fixture concurrency campaign (current)
+
+Four authored, exactly tokenized fixtures (prose, structured JSON, Python LRU
+code, reasoning with a frozen CPU oracle) served **64/64 groups and 240/240
+measured requests** at C1/2/4/8 on one boot with retained k5 and an explicit
+2 GiB KV pool; 32 warmups were excluded, with zero invalid rows and zero
+preemptions. Each type has one authored fixture and two groups per cell, so
+these are fixture-level observations, not category generalizations. Prefill and
+decode shapes were never pooled.
+
+| shape | C | request med | request peak | group med | active max |
+|---|---:|---:|---:|---:|---:|
+| prefill | 1 | 2,715.34 | 2,727.83 | 2,679.00 | 1 |
+| prefill | 2 | 1,843.53 | 2,183.51 | 2,702.13 | 2 |
+| prefill | 4 | 1,454.45 | 2,183.00 | 2,712.25 | 2 |
+| prefill | 8 | 1,364.21 | 2,186.63 | 2,716.73 | 2 |
+| decode | 1 | 88.27 | 119.78 | 88.27 | 1 |
+| decode | 2 | 55.81 | 72.93 | 107.91 | 2 |
+| decode | 4 | 33.74 | 42.07 | 125.23 | 4 |
+| decode | 8 | 22.05 | 30.02 | 163.09 | 8 |
+
+Group prefill was flat (**2,679.00 → 2,716.73 tok/s, +1.4%**). The C1
+per-request decode median was **88.27**; per-type C1 medians were prose
+**50.56**, structured **98.39**, code **111.18** (peak **119.78**) and
+reasoning **81.73**. The **163.09 C8** value is a multi-request group aggregate,
+not a single-stream result, so the **120 tok/s** per-request target remains
+unmet; no per-request or per-type median reaches it. Weighted decode acceptance
+was **0.5085** (176,466 accepted / 347,020 proposed over 69,404 steps);
+per-type weighted acceptance was prose **0.2348**, structured **0.7382**, code
+**0.8029** and reasoning **0.5793**. Prefill acceptance is **N/A** because no
+draft tokens were proposed, not zero. The derived `1 + accepted/steps` is
+theoretical and neither it nor the actual generation-counter rate is a
+lossless/quality/batch-invariance proof.
+
+Decode active overlap is exactly **1/2/4/8** across all types and repeats;
+prefill active overlap peaks at **2** because one 2048-token prompt fills
+`MAX_NUM_BATCHED_TOKENS=2048`, so C4/C8 prefill queues (queue-time maxima
+**1.50 s** and **4.51 s**). C8 prefill is a queued control, not eight parallel
+prefills. GPU0 minimum free was **572 MiB** in every cell; the 2 GiB pool
+reported **2,073,385 tokens** and **1.9773×** at the configured 1,048,576-token
+admission cap. No 3 GiB fit is claimed, and the largest tested prompt was
+**2048 tokens** (largest total **2560**), not a 1M-token request. The 64
+measured groups took **2,174.71 s (36m15s)**; the full harness wall including
+startup and warmup was **2,631.831 s (43m52s)**, and directory preparation is
+outside both. Details: README Results and PLAN W10.
+
+### 2026-10-22 earlier old-fixture concurrency / 2 GiB KV campaign (historical)
+
+**Historical evidence with the old reusable fixtures and old type labels.**
+These values are preserved exactly but are not directly comparable to the
+current distinct-fixture campaign; the **135.0 tok/s** single-request peak is a
+historical old-tool-agent observation, not a current hardware ceiling.
 
 A separate 2 GiB explicit-KV campaign (64/64 groups, 240/240 measured
 requests, zero invalid, zero preemptions) measured the retained k5 under 8×
@@ -823,5 +887,5 @@ peaks at **2** because one 2048-token prompt fills
 wait 1,920 ms), not eight parallel prefills. The 2 GiB pool reported
 **2,073,385 tokens**, **1.9773×** maximum native concurrency at a configured
 1,048,576-token limit, and **572 MiB** campaign minimum free; C8 added no
-measurable allocation. 3 GiB did not complete a real prefill. No 1M-token
-request was tested. Details: README Results and PLAN W9.
+measurable allocation. No 3 GiB fit is claimed. No 1M-token
+request was tested. Details: README Results and PLAN W9 (historical).
