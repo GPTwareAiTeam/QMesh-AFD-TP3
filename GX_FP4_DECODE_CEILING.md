@@ -748,3 +748,59 @@ drafter**; k5 reports **93,506 MiB used / 3,744 MiB free**, RG6 **94,262 /
 (earlier k5 snapshots 3,744 MiB), so measured headroom is **~2.9–3.7 GiB**.
 There was no OOM across 384 timed + 144 quality rows. Rebalancing remains
 ruled out. **>75 tok/s remains unmet; 120 tok/s was not reached.**
+
+### 2026-10-22 k7 trial (REJECTED; k5 retained)
+
+A matched A/B ran `SPEC_TOKENS=7` (captures `1,7,8`, verify width 8, retention
+extra 8, `MAX_CAPTURE=8`) against the retained k5 on the same budget
+(`GPU_MEM_UTIL=0.97`, `DSPARK_EXTRA_GIB=1`, prefix caching off): **64 forced
+rows** per configuration with identical prompts and budgets, 64/64 valid with
+`prompt_exact` and `budget_exact` in every row. Pair medians,
+`1024p_128c / 128p_1024c` tok/s: k5 **77.84 / 105.07**, k7 **67.67 / 95.97**,
+i.e. **-13.07% / -8.65%**. Long E2E rises 10.06 -> 10.99 s (+9.26%) and short
+E2E 2.219 -> 2.465 s (+11.1%), with flat TTFT (0.568 / 0.319 vs 0.578 / 0.324
+s), so the loss is inside the decode loop.
+
+The speculative counters say why. Acceptance falls **0.6918 -> 0.5486**,
+drafted tokens rise 41,420 -> 53,466 over 8,284 -> 7,638 draft steps, and
+`mean_accepted_length` rises 4.459 -> 4.840 — a counter that includes the bonus
+token, i.e. *emitted tokens per step* (3.459 + 1 against 3.840 + 1). Acceptance
+by position falls from 0.896/0.788/0.687/0.589/0.499 to
+0.873/0.750/0.643/0.536/0.448/0.351/0.239, so positions 5 and 6 — the two the
+wider verify adds — are the weakest of the seven. One extra emitted token per
+step does not pay for the wider verify step: the measured decode ceiling moves
+down, not up. 120 tok/s is reached by **4 of 64** k7 requests (all long, max
+134.35) against 3 of 64 at k5, and by no per-context median.
+
+Memory and retention held: KV capacity **20,134** tokens (k5 20,227), CUDA
+graph pool **0.09 GiB** (k5 0.08), one main plus one dspark graph captured (the
+same graph count as k5), retention extra **8** with no null/evicted-block
+crash, no OOM and zero request errors; boot to healthy was 502 s for k7 against
+461 s for the restored k5. After the k7 timed run GPU0 reported **95,398 MiB
+used / 1,852 MiB free**; the restored k5 read **93,536 / 3,714 MiB** at idle.
+
+Confound, stated rather than resolved: GPU0's SM clock mean was **2294 MHz** in
+both windows (GPU0 power 178.3 W at k7 vs 181.0 W at k5, util 99.1% vs 98.6%),
+but GPU1 carried an external workload for part of the k7 window (util mean
+23.6%) that is outside our control, and the k5 counter window is the prior
+run's rather than the paired run's. The gap is **not proven engine-only**; it
+is also not explained by clock or thermal throttling. Verdict: **k5 retained,
+k7 rejected**; k5 was restored and serves on port 8001.
+
+Quality: three natural-stop passes per configuration (official chat, thinking
+off; 24 rows per pass, 72 rows per configuration, 144 in total) gave k5
+**15/16, 15/16, 15/16** and k7 **15/16, 15/16, 14/16**, sampled 8/8 in all six,
+so the trial adds no quality gain. k7's third pass misses the
+required consumer-visible `failures` attribute on `codegen-b` (it exposes
+`failure_count`; the module parses, `finish_reason=stop`), a public-API
+contract miss, and `codeedit-b` misses `page_bounds` in all six passes for both
+configurations.
+
+Recipe: `SPEC_TOKENS=7 GPU_MEM_UTIL=0.97 DSPARK_EXTRA_GIB=1
+CAPTURE_SIZES=1,7,8 MAX_CAPTURE=8 DSPARK_MEM_ACK=1 NAME=dsv41-dspark-k7 bash
+scripts/launch_engine_graphs.sh`. Artifacts (eval results directory, untracked):
+`round_k5_k7pair_20261022T122131Z/`, `round_k5_k7pair_chatq1/`,
+`round_k5_k7pair_chatq2/`, `round_k7_20261022T124251Z/`,
+`round_k7_chatq1/`, `round_k7_chatq2/`, `round_k7_boot_20261022T123333Z/`,
+`round_k5_restore_20261022T125508Z/`, `compare_k7_20261022T125136Z.txt`,
+`k7_result_20261022T130500Z.json`.
