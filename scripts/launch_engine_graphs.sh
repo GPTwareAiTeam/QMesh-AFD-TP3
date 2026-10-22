@@ -12,9 +12,11 @@
 # exists (running or stopped), this exits nonzero and leaves it alone.
 #
 # Env knobs (all optional unless noted):
-#   SPEC_TOKENS=N          0 (default, non-spec rollback) or 1..5. 1/3/5 are the
-#                          validated points; 2/4 need an explicit CAPTURE_SIZES.
-#                          >0 requires explicit GPU_MEM_UTIL and DSPARK_EXTRA_GIB.
+#   SPEC_TOKENS=N          0 (default, non-spec rollback), 1..5, or 7. 1/3/5 are
+#                          the validated points; 2/4 need an explicit
+#                          CAPTURE_SIZES; 7 is new (verify width 8) and defaults
+#                          to 1,7,8. 6 is rejected. >0 requires explicit
+#                          GPU_MEM_UTIL and DSPARK_EXTRA_GIB.
 #   GPU_MEM_UTIL=0.xx      REQUIRED when SPEC_TOKENS>0. The default 0.90 applies
 #                          only to SPEC_TOKENS=0. Checked against the measured
 #                          baseline + DSpark drafter + DSPARK_EXTRA_GIB.
@@ -25,8 +27,9 @@
 #   DSPARK_MEM_ACK=1       required to accept GPU_MEM_UTIL>0.97
 #   GPU_TOTAL_MIB=N        override GPU0 memory.total (default: nvidia-smi -i 0)
 #   CAPTURE_SIZES=a,b,...  decode capture sizes. Default by SPEC: 0 -> 1,
-#                          1 -> 1,2, 3 -> 1,3,4, 5 -> 1,5,6. Any explicit list
-#                          must contain 1 and, for SPEC>0, SPEC and SPEC+1.
+#                          1 -> 1,2, 3 -> 1,3,4, 5 -> 1,5,6, 7 -> 1,7,8. Any
+#                          explicit list must contain 1 and, for SPEC>0, SPEC
+#                          and SPEC+1.
 #   MAX_CAPTURE=N          scalar --max-cudagraph-capture-size; defaults to the
 #                          largest CAPTURE_SIZES entry and must be >= it
 #   EAGER=1                explicit experiment: --enforce-eager, no CUDA graphs
@@ -232,11 +235,10 @@ esac
 case "$AFD_SEAM" in 0|1) ;; *) die "AFD_SEAM must be 0 or 1, got '$AFD_SEAM'";; esac
 case "$DRY_RUN" in 0|1) ;; *) die "DRY_RUN must be 0 or 1, got '$DRY_RUN'";; esac
 case "$SPEC_TOKENS" in
-  0|1|2|3|4|5) ;;
-  *) die "SPEC_TOKENS must be 0..5 (validated: 0/1/3/5), got '$SPEC_TOKENS'" ;;
+  0|1|2|3|4|5|7) ;;
+  *) die "SPEC_TOKENS must be 0..5 or 7 (validated: 0/1/3/5), got '$SPEC_TOKENS'" ;;
 esac
-if [[ "$SPEC_TOKENS" != 0 && "$SPEC_TOKENS" != 1 && "$SPEC_TOKENS" != 3 \
-      && "$SPEC_TOKENS" != 5 ]]; then
+if [[ "$SPEC_TOKENS" == 2 || "$SPEC_TOKENS" == 4 ]]; then
   echo "launch: SPEC_TOKENS=$SPEC_TOKENS is measurable but not a validated point; explicit CAPTURE_SIZES is required" >&2
 fi
 
@@ -255,6 +257,7 @@ else
       1) CAPTURE_SIZES=1,2 ;;
       3) CAPTURE_SIZES=1,3,4 ;;
       5) CAPTURE_SIZES=1,5,6 ;;
+      7) CAPTURE_SIZES=1,7,8 ;;
       *) die "SPEC_TOKENS=$SPEC_TOKENS has no validated capture default; set CAPTURE_SIZES explicitly (must contain 1, $SPEC_TOKENS and $((SPEC_TOKENS+1)))" ;;
     esac
   fi
@@ -379,8 +382,11 @@ for key, want in expect.items():
     got = get(key)
     if got != want:
         sys.exit(f"model config {key}={got!r}, expected {want!r}")
-if k > expect["dspark_block_size"]:
-    sys.exit(f"SPEC_TOKENS={k} exceeds the trained dspark_block_size")
+# dspark_block_size is the checkpoint's default drafting width, not an
+# architectural cap: vllm's DSpark config only uses it to default
+# num_speculative_tokens when that is omitted, and every draft buffer, mask,
+# and position is sized from the requested width. The launcher allowlist
+# bounds SPEC_TOKENS to 7 (verify width 8); the learned weights are unchanged.
 
 index_path = os.path.join(model_dir, "model.safetensors.index.json")
 with open(index_path) as f:
