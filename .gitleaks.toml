@@ -1,0 +1,145 @@
+title = "shared internal-info denylist (guardrails) - content rules"
+# Single source of truth for every repo. Consumed by:
+#   - pre-commit (see .pre-commit-config.yaml -> hook gitleaks)
+#   - CI (.github/workflows/internal-scan.yml)
+#   - local audit scripts
+# Path-scoped rules live in internal-scan.py (path denylist), not here: gitleaks
+# reports one finding per matching LINE, which makes path rules unusably noisy.
+[extend]
+useDefaultRules = true
+
+# ---------------------------------------------------------------- CREDENTIALS
+[[rules]]
+id = "github-token-any"
+description = "GitHub token (classic or fine-grained)"
+regex = '''(gh[pousr]_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{40,})'''
+keywords = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
+tags = ["CREDENTIAL", "token", "github"]
+
+[[rules]]
+id = "ssh-private-key"
+description = "OpenSSH or PEM private key block"
+regex = '''-----BEGIN (OPENSSH|RSA|DSA|EC|PGP|ENCRYPTED)? ?PRIVATE KEY( BLOCK)?-----'''
+keywords = ["-----begin"]
+tags = ["CREDENTIAL", "key"]
+
+[[rules]]
+id = "wireguard-private-key"
+description = "WireGuard private or preshared key (router/VPN config)"
+regex = '''(?im)^\s*(privatekey|presharedkey|psk)\s*=\s*[A-Za-z0-9+/=]{40,}'''
+keywords = ["privatekey", "presharedkey", "psk"]
+tags = ["CREDENTIAL", "network"]
+
+[[rules]]
+id = "generic-secret-assignment"
+description = "Secret-like assignment with a high-entropy value"
+regex = '''(?i)\b(api[_-]?key|secret|token|passwd|password|access[_-]?key|access[_-]?token|client[_-]?secret|bearer)\b\s*[:=]\s*["']?[A-Za-z0-9/+._~\-]{20,}["']?'''
+entropy = 3.6
+keywords = ["api_key", "apikey", "secret", "token", "password", "passwd", "access_key", "bearer"]
+tags = ["CREDENTIAL", "secret"]
+
+[[rules]]
+id = "cloud-and-llm-keys"
+description = "AWS / Google / Anthropic / OpenAI / OpenRouter / Slack / Telegram bot credential"
+regex = '''\b(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{35}|sk-(ant|proj|or-v1)[A-Za-z0-9]{20,}|xox[baprs]-[0-9A-Za-z-]{10,}|[0-9]{9,10}:AA[A-Za-z0-9_\-]{30,})'''
+keywords = ["akia", "aiza", "sk-ant", "sk-proj", "sk-or-v1", "xox", ":aa"]
+tags = ["CREDENTIAL", "token"]
+
+[[rules]]
+id = "basic-auth-url"
+description = "URL with embedded user:password credential"
+regex = '''[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@"'\ ]{2,}:[^/\s:@"'\ ]{4,}@[a-zA-Z0-9.\-]+'''
+keywords = ["://"]
+tags = ["CREDENTIAL", "url"]
+
+[[rules]]
+id = "db-connection-uri"
+description = "Database connection string with credentials"
+regex = '''(?i)\b(postgres(ql)?|mysql|mongodb(\+srv)?|redis|amqp)://[^\s"']*[^\s"':/][@;][^\s"']*'''
+keywords = ["postgres://", "postgresql://", "mysql://", "mongodb://", "redis://", "amqp://"]
+tags = ["CREDENTIAL", "database"]
+
+# ------------------------------------------------------------- INTERNAL INFO
+[[rules]]
+id = "internal-user-path"
+description = "Internal home directory path"
+regex = '''/home/(treadall|dcmaxhome|dcdexhome|dex|dexhome|ubuntu|admin|ops|builder)\b'''
+keywords = ["/home/"]
+tags = ["INTERNAL", "paths", "user"]
+
+[[rules]]
+id = "internal-model-and-data-path"
+description = "Internal model or data volume path"
+regex = '''(/models/[A-Za-z0-9]|/mnt/data[0-9]+\b|/mnt/REDACTED\b|/root/REDACTED\b|/opt/REDACTED\b|/var/lib/docker/volumes/[a-z0-9_]+|\.local/share/REDACTED\b|~/\.openclaw\b)'''
+keywords = ["/models/", "/mnt/data", "/mnt/REDACTED", "/root/REDACTED", "/opt/REDACTED", "openclaw", "omp-dash"]
+tags = ["INTERNAL", "paths", "models"]
+
+[[rules]]
+id = "internal-hostname"
+description = "Internal node, host or container name"
+regex = '''(?i)\b(gx10-[0-9a-z]+|gx10s?\b|seam-(p7|gx)[a-z0-9]*|expert-worker-gx[0-9]|gptware-vps|hwfloor-hf|sparkpoly|srv[0-9]{6,})|\b(GX[12]\b|NODE-A\b)'''
+keywords = ["gx10", "seam-A-REDACTED", "seam-gx", "gptware-vps", "hwfloor", "sparkpoly", "srv", "node-b", "node-c", "p7"]
+tags = ["INTERNAL", "hosts"]
+
+[[rules]]
+id = "private-ip"
+description = "RFC1918 or CGNAT/Tailscale address"
+regex = '''\b(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3})\b'''
+keywords = ["10.", "192.168.", "172.", "100."]
+tags = ["INTERNAL", "network"]
+
+[[rules]]
+id = "internal-port"
+description = "Internal service listener (non-standard port)"
+regex = '''(?i)\b(localhost|127\.0\.0\.1|0\.0\.0\.0|[0-9]{1,3}(\.[0-9]{1,3}){3}):(864[0-9]|873[0-9]|874[0-9]|9119|9421|8998|8172|8120|6349|18735|47311|47351|29517)\b'''
+keywords = ["localhost:", "127.0.0.1:", "0.0.0.0:", ":864", ":873", ":874", ":[REDACTED-PORT]", ":9421", ":8998", ":8172", ":8120", ":6349", ":18735", ":[REDACTED-PORT]", ":[REDACTED-PORT]", ":[REDACTED-PORT]"]
+tags = ["INTERNAL", "network", "ports"]
+
+[[rules]]
+id = "internal-email"
+description = "Personal or internal email identity"
+regex = '''(?i)\b(dcmaxhome|dcdexhome|treadall|hwfloor|gptware)[a-z0-9._-]*@(users\.noreply\.github\.com|gmail\.com|gptware\.[a-z]+|proton(me)?\.[a-z]+|outlook\.com|hotmail\.com)\b'''
+keywords = ["@users.noreply.github.com", "@gmail.com", "@gptware", "@proton", "@outlook", "@hotmail"]
+tags = ["INTERNAL", "identity"]
+
+[[rules]]
+id = "router-gateway-config"
+description = "Router, gateway, VPN, RDMA or DNS appliance configuration"
+regex = '''(?i)\b(allowedips|listen_port\s+|listenport|interface\s+wg[0-9]|pppoe|dnsmasq|odhcpd|uci set|config interface\s|port-forward|wireguard|roce[a-z0-9]+|mlx5[_-][a-z0-9]+|/dev/infiniband)\b'''
+keywords = ["allowedips", "listenport", "listen_port", "pppoe", "dnsmasq", "odhcpd", "uci set", "wireguard", "port-forward", "roce", "mlx5", "/dev/infiniband"]
+tags = ["INTERNAL", "network", "router"]
+
+[[rules]]
+id = "internal-account-id"
+description = "Internal account, key or uid identifier"
+regex = '''(?i)\b(ssh-rsa\s+AAAA|ecdsa-sha2-nistp|authorized_keys|uid[= ]1000|user_?[0-9]{8,})'''
+keywords = ["ssh-rsa", "ecdsa-sha2", "authorized_keys", "uid=1000", "uid 1000"]
+tags = ["INTERNAL", "identity"]
+
+[[rules]]
+id = "internal-codename"
+description = "Internal-only project, worktree or archive name"
+regex = '''(?i)\b(QMesh-offline-shotgun|REDACTED-archive|dsv41-(packs|evidence|routing|nsight|1x2|newquant|draftacc)|kld-r5|REDACTED-forensic|coldsteal|coopfast[0-9]?|recipe-[a-z0-9-]+|p7-2gx[a-z0-9-]*|qmesh-(gxslab|fp2-shotgun|notes|bench|exl3-graph)|REDACTED-cold-pack|pairs/(prod|dev))'''
+keywords = ["REDACTED-archive", "REDACTED-forensic", "coldsteal", "coopfast", "kld-r5", "dsv41-", "recipe-", "p7-2gx", "REDACTED-cold-pack", "/pairs/"]
+tags = ["INTERNAL", "naming"]
+
+[allowlist]
+description = "vendor, generated and fixture noise"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)vendor/''',
+  '''(^|/)dist/assets/''',
+  '''\.min\.(js|css)$''',
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)uv\.lock$''',
+  '''(^|/)\.gitleaks\.toml$''',
+  '''(^|/)tests?/.*test_.*\.py$''',
+  '''(^|/)\.pre-commit-config\.yaml$'''
+]
+regexes = [
+  '''(?i)exampl[e-]''',
+  '''(?i)(your[_-]?|xxx+|yyy+|placeholder|changeme|dummy|fake|notreal|sample[_-]?key|hunter2)''',
+  '''^[0-9a-f]{40}$''',
+  '''(?i)postgres(ql)?://user:pass''',
+  '''(?i)://<?user>??:<?pass>?@'''
+]

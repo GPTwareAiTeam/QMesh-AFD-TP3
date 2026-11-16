@@ -12,3 +12,15 @@ __pycache__/
 
 # Default DSPARK_EVAL_OUT target; benchmark sources under gx/ stay tracked.
 /eval-out/
+notes/
+logs/
+*.ledger.md
+RESTORE*.md
+*Ledger*.md
+*prod*.txt
+*.sqlite
+*.sqlite3
+.env
+.env.*
+*.pem
+*.key

@@ -1,0 +1,46 @@
+# Shared pre-commit config. One denylist for every repo: the hooks below are
+# fetched from the guardrails repo, so updating the denylist there updates here.
+#
+# Install per repo:  cp guardrails/.pre-commit-config.yaml <repo>/
+#                    pre-commit install --hook-type pre-commit --hook-type commit-msg
+#                    pre-commit install --hook-type pre-push
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+      - id: check-merge-conflict
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        args: ['--config', '.gitleaks.toml', '--redact', '--exit-code', '1']
+
+  # Local hooks: the shared denylist files are vendored into each repo by
+  # guardrails/install_guardrails.sh (so the hook works offline and on forks).
+  - repo: local
+    hooks:
+      - id: internal-scan-staged
+        name: internal-info denylist (staged files)
+        entry: python3 .githooks/internal-scan.py --files
+        language: system
+        pass_filenames: true
+        stages: [pre-commit]
+      - id: internal-scan-pushed
+        name: internal-info denylist (commits being pushed)
+        entry: python3 .githooks/internal-scan.py --range
+        language: system
+        args: ['origin/HEAD..HEAD']
+        pass_filenames: false
+        stages: [pre-push]
+      - id: no-internal-artifacts
+        name: block notes/ledgers/logs/env dumps from being added
+        entry: python3 .githooks/internal-scan.py --files
+        language: system
+        files: '(^|/)(notes|logs?|runbooks?|ops|ledgers)/|(^|/)[^/]*(ledger|restore)[^/]*\.(md|txt)$|(^|/)[^/]*prod[^/]*\.txt$|(^|/)\.env([.-][a-z0-9]+)?$|\.sqlite3?$'
+        pass_filenames: true
+        stages: [pre-commit]
