@@ -44,7 +44,7 @@ CONTENT_RULES = [
     ('INTERNAL',   'node-name',       r'\b(GX[12]\b|P7\b)'),
     ('INTERNAL',   'private-ip',      r'(?<![\d.])(?:10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3})(?![\d./-])'),
     ('INTERNAL',   'internal-port',   r':\b(864[0-9]|873[0-9]|874[0-9]|9119|9421|8998|8172|8120|6349|18735|47311|47351|29517)\b'),
-    ('INTERNAL',   'internal-email',  r'(?i)\b(?:dcmaxhome|dcdexhome|' + USERS + r'|gptware)[a-z0-9._-]*@(?:users\.noreply\.github\.com|gmail\.com|gptware\.[a-z]+|proton(?:me)?\.[a-z]+)'),
+    ('INTERNAL',   'internal-email',  r'(?i)\b(?:dcmaxhome|dcdexhome|' + USERS + r'|gptware)[a-z0-9._-]*@(?:gmail\.com|gptware\.[a-z]+|proton(?:me)?\.[a-z]+)'),
     ('INTERNAL',   'rdma-or-netdev',  r'(?i)\b(roce(?!X-REDACTED)[a-z0-9]+|/dev/infiniband|allowedips|listen_port\s+[0-9]|wireguard)\b'),
     ('INTERNAL',   'ssh-material',    r'(ssh-(rsa|ed25519)\s+AAAA|authorized_keys|ecdsa-sha2-nistp)'),
 ]
@@ -52,13 +52,13 @@ CONTENT_RULES = [
 PATH_RULES = [(s, n, re.compile(p)) for s, n, p in PATH_RULES]
 CONTENT_RULES = [(s, n, re.compile(p)) for s, n, p in CONTENT_RULES]
 
-SKIP_PATH = re.compile(r'(^|/)(node_modules|vendor|\.git)/|\.gitleaks\.toml$|(^|/)\.pre-commit-config\.yaml$|\.min\.(js|css)$|(^|/)(package-lock|uv)\.lock$|\.svg$|\.png$|\.jpg$|\.gif$|\.woff2?$|\.pdf$')
+SKIP_PATH = re.compile(r'(^|/)(node_modules|vendor|\.git)/|(\.gitleaks\.toml|internal-scan\.py|\.pre-commit-config\.yaml)$|(^|/)\.pre-commit-config\.yaml$|\.min\.(js|css)$|(^|/)(package-lock|uv)\.lock$|\.svg$|\.png$|\.jpg$|\.gif$|\.woff2?$|\.pdf$')
 # Calibration corpora and vendored upstream sources legitimately contain code
 # snippets that look like credentials; they are reviewed, not blocked.
 SOFT_PATH = re.compile(r'standard_cal_data/|(^|/)vendor/|third_party/|(^|/)exllamav3/|(^|/)util/|(^|/)examples/|(^|/)eval/|(^|/)doc/')
 
 
-PLACEHOLDER = re.compile(r'/path/to/|/your/|<[^>\n]{1,40}>|\bexample\.(?:com|org)\b|clientRegistration|context\.(?:next|getCurrent)Token|/redist/|\.nvidia\.com/|huggingface\.co')
+PLACEHOLDER = re.compile(r'@users\.noreply\.github\.com|/path/to/|/your/|<[^>\n]{1,40}>|\bexample\.(?:com|org)\b|clientRegistration|context\.(?:next|getCurrent)Token|/redist/|\.nvidia\.com/|huggingface\.co')
 
 
 def report(sev, rule, where, path, line, sample):

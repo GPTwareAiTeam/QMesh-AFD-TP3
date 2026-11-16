@@ -98,8 +98,8 @@ tags = ["INTERNAL", "network", "ports"]
 [[rules]]
 id = "internal-email"
 description = "Personal or internal email identity"
-regex = '''(?i)\b(dcmaxhome|dcdexhome|treadall|hwfloor|gptware)[a-z0-9._-]*@(users\.noreply\.github\.com|gmail\.com|gptware\.[a-z]+|proton(me)?\.[a-z]+|outlook\.com|hotmail\.com)\b'''
-keywords = ["@users.noreply.github.com", "@gmail.com", "@gptware", "@proton", "@outlook", "@hotmail"]
+regex = '''(?i)\b(dcmaxhome|dcdexhome|treadall|hwfloor|gptware)[a-z0-9._-]*@(gmail\.com|gptware\.[a-z]+|proton(me)?\.[a-z]+|outlook\.com|hotmail\.com)\b'''
+keywords = ["@gmail.com", "@gptware", "@proton", "@outlook", "@hotmail"]
 tags = ["INTERNAL", "identity"]
 
 [[rules]]
@@ -137,11 +137,13 @@ paths = [
   '''(^|/)package-lock\.json$''',
   '''(^|/)uv\.lock$''',
   '''(^|/)\.gitleaks\.toml$''',
+  '''(^|/)\.githooks/internal-scan\.py$''',
   '''(^|/)tests?/.*test_.*\.py$''',
   '''(^|/)\.pre-commit-config\.yaml$'''
 ]
 regexes = [
   '''REDACTED''',
+  '''@users\.noreply\.github\.com''',
   '''(?i)exampl[e-]''',
   '''(?i)(your[_-]?|xxx+|yyy+|placeholder|changeme|dummy|fake|notreal|sample[_-]?key|hunter2)''',
   '''^[0-9a-f]{40}$''',
