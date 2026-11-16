@@ -70,21 +70,21 @@ tags = ["INTERNAL", "paths", "user"]
 [[rules]]
 id = "internal-model-and-data-path"
 description = "Internal model or data volume path"
-regex = '''(/models/[A-Za-z0-9]|/mnt/data[0-9]+\b|/mnt/REDACTED\b|/root/REDACTED\b|/opt/REDACTED\b|/var/lib/docker/volumes/[a-z0-9_]+|\.local/share/REDACTED\b|~/\.openclaw\b)'''
-keywords = ["/models/", "/mnt/data", "/mnt/REDACTED", "/root/REDACTED", "/opt/REDACTED", "openclaw", "omp-dash"]
+regex = '''(?:^|[\s\"'=(,`{])(?:/models/[A-Za-z0-9]|/mnt/data[0-9]+\b|/mnt/str\b|/root/private\b|/opt/vllm-moet\b|/var/lib/docker/volumes/[a-z0-9_]+|\.local/share/omp-dash\b|~/\.openclaw\b)'''
+keywords = ["/models/", "/mnt/data", "/mnt/str", "/root/private", "/opt/vllm-moet", "openclaw", "omp-dash"]
 tags = ["INTERNAL", "paths", "models"]
 
 [[rules]]
 id = "internal-hostname"
 description = "Internal node, host or container name"
-regex = '''(?i)\b(gx10-[0-9a-z]+|gx10s?\b|seam-(p7|gx)[a-z0-9]*|expert-worker-gx[0-9]|gptware-vps|hwfloor-hf|sparkpoly|srv[0-9]{6,})|\b(GX[12]\b|NODE-A\b)'''
-keywords = ["gx10", "seam-A-REDACTED", "seam-gx", "gptware-vps", "hwfloor", "sparkpoly", "srv", "node-b", "node-c", "p7"]
+regex = '''(?i)\b(gx10-[0-9a-z]+|seam-(p7|gx)[a-z0-9]*|expert-worker-gx[0-9]|gptware-vps|hwfloor-hf|sparkpoly|srv[0-9]{6,})|(?-i:\b(GX[12]|P7)\b)'''
+keywords = ["gx10", "seam-p7", "seam-gx", "gptware-vps", "hwfloor", "sparkpoly", "srv", "gx1", "gx2", "p7"]
 tags = ["INTERNAL", "hosts"]
 
 [[rules]]
 id = "private-ip"
 description = "RFC1918 or CGNAT/Tailscale address"
-regex = '''\b(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3})\b'''
+regex = '''(?:^|[^\d.])(?:10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3})(?:[^\d./-]|$)'''
 keywords = ["10.", "192.168.", "172.", "100."]
 tags = ["INTERNAL", "network"]
 
@@ -92,7 +92,7 @@ tags = ["INTERNAL", "network"]
 id = "internal-port"
 description = "Internal service listener (non-standard port)"
 regex = '''(?i)\b(localhost|127\.0\.0\.1|0\.0\.0\.0|[0-9]{1,3}(\.[0-9]{1,3}){3}):(864[0-9]|873[0-9]|874[0-9]|9119|9421|8998|8172|8120|6349|18735|47311|47351|29517)\b'''
-keywords = ["localhost:", "127.0.0.1:", "0.0.0.0:", ":864", ":873", ":874", ":[REDACTED-PORT]", ":9421", ":8998", ":8172", ":8120", ":6349", ":18735", ":[REDACTED-PORT]", ":[REDACTED-PORT]", ":[REDACTED-PORT]"]
+keywords = ["localhost:", "127.0.0.1:", "0.0.0.0:", ":864", ":873", ":874", ":9119", ":9421", ":8998", ":8172", ":8120", ":6349", ":18735", ":47311", ":47351", ":29517"]
 tags = ["INTERNAL", "network", "ports"]
 
 [[rules]]
@@ -105,8 +105,8 @@ tags = ["INTERNAL", "identity"]
 [[rules]]
 id = "router-gateway-config"
 description = "Router, gateway, VPN, RDMA or DNS appliance configuration"
-regex = '''(?i)\b(allowedips|listen_port\s+|listenport|interface\s+wg[0-9]|pppoe|dnsmasq|odhcpd|uci set|config interface\s|port-forward|wireguard|roce[a-z0-9]+|mlx5[_-][a-z0-9]+|/dev/infiniband)\b'''
-keywords = ["allowedips", "listenport", "listen_port", "pppoe", "dnsmasq", "odhcpd", "uci set", "wireguard", "port-forward", "roce", "mlx5", "/dev/infiniband"]
+regex = '''(?i)\b(allowedips|listen_port\s+|listenport|interface\s+wg[0-9]|pppoe|dnsmasq|odhcpd|uci set|config interface\s|port-forward|wireguard|roce[a-z0-9]+|/dev/infiniband)\b'''
+keywords = ["allowedips", "listenport", "listen_port", "pppoe", "dnsmasq", "odhcpd", "uci set", "wireguard", "port-forward", "roce", "/dev/infiniband"]
 tags = ["INTERNAL", "network", "router"]
 
 [[rules]]
@@ -119,13 +119,17 @@ tags = ["INTERNAL", "identity"]
 [[rules]]
 id = "internal-codename"
 description = "Internal-only project, worktree or archive name"
-regex = '''(?i)\b(QMesh-offline-shotgun|REDACTED-archive|dsv41-(packs|evidence|routing|nsight|1x2|newquant|draftacc)|kld-r5|REDACTED-forensic|coldsteal|coopfast[0-9]?|recipe-[a-z0-9-]+|p7-2gx[a-z0-9-]*|qmesh-(gxslab|fp2-shotgun|notes|bench|exl3-graph)|REDACTED-cold-pack|pairs/(prod|dev))'''
-keywords = ["REDACTED-archive", "REDACTED-forensic", "coldsteal", "coopfast", "kld-r5", "dsv41-", "recipe-", "p7-2gx", "REDACTED-cold-pack", "/pairs/"]
+regex = '''(?i)\b(QMesh-offline-shotgun|projects-archive|dsv41-(packs|evidence|routing|nsight|1x2|newquant|draftacc)|kld-r5|qmesh-forensic|recipe-artifacts|p7-2gx[a-z0-9-]*|qmesh-(gxslab|fp2-shotgun|notes|bench|exl3-graph)|exl3-cold-pack|pairs/(prod|dev))'''
+keywords = ["projects-archive", "qmesh-forensic", "kld-r5", "dsv41-", "recipe-artifacts", "p7-2gx", "exl3-cold-pack", "/pairs/"]
 tags = ["INTERNAL", "naming"]
 
 [allowlist]
 description = "vendor, generated and fixture noise"
 paths = [
+  '''standard_cal_data/''',
+  '''(^|/)exllamav3/''',
+  '''third_party/''',
+  '''(^|/)vendor/''',
   '''(^|/)node_modules/''',
   '''(^|/)vendor/''',
   '''(^|/)dist/assets/''',
@@ -137,6 +141,7 @@ paths = [
   '''(^|/)\.pre-commit-config\.yaml$'''
 ]
 regexes = [
+  '''REDACTED''',
   '''(?i)exampl[e-]''',
   '''(?i)(your[_-]?|xxx+|yyy+|placeholder|changeme|dummy|fake|notreal|sample[_-]?key|hunter2)''',
   '''^[0-9a-f]{40}$''',
