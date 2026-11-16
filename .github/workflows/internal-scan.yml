@@ -1,0 +1,52 @@
+name: internal-scan
+# Blocks internal information (credentials, hostnames, private addresses, ops
+# notes) from entering the repo on every push and every pull request.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history so the range scan can see every commit in the push
+          fetch-depth: 0
+
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          v=8.21.2
+          curl -sSL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz"
+          tar xzf gl.tgz gitleaks && sudo install -m0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: gitleaks (full history)
+        run: gitleaks git --config .gitleaks.toml --log-opts "--all" --redact --exit-code 1 .
+      - name: internal-info denylist - commits in this push or PR
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${{ github.event.before }}..${{ github.event.after }}"
+          fi
+          echo "scanning $RANGE"
+          git fetch --no-tags origin "${{ github.event.before }}" 2>/dev/null || true
+          python3 .githooks/internal-scan.py --range "$RANGE"
+
+      - name: internal-info denylist - paths ever committed (weekly full audit)
+        if: github.event_name == 'workflow_dispatch'
+        run: python3 .githooks/internal-scan.py --all
